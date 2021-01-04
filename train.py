@@ -9,7 +9,7 @@ import warnings
 from datetime import datetime
 from io import TextIOBase
 
-import models.cifar as models
+import shortuuid
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -19,10 +19,14 @@ import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from prettytable import PrettyTable
+from torch.utils.tensorboard import SummaryWriter
 from torchsummary import summary
+from torchvision import datasets
+
+import models as models
+from dataset.BaseDataset import MultiLabelDataset
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -31,7 +35,8 @@ model_names = sorted(name for name in models.__dict__
 parser = argparse.ArgumentParser(description='PyTorch Cifar10 Training')
 parser.add_argument('-data', metavar='DIR',
                     help='path to dataset')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='vgg19_bn',
+parser.add_argument('-dataset', type=str, default='strawberry_disease', help='dataset')
+parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                          ' | '.join(model_names) +
@@ -43,19 +48,26 @@ parser.add_argument('--cardinality', type=int, default=8, help='Model cardinalit
 parser.add_argument('--widen-factor', type=int, default=4, help='Widen factor. 4 -> 64, 8 -> 128, ...')
 parser.add_argument('--growthRate', type=int, default=12, help='Growth rate for DenseNet.')
 parser.add_argument('--compressionRate', type=int, default=2, help='Compression Rate (theta) for DenseNet.')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=164, type=int, metavar='N',
+parser.add_argument('--epochs', default=2, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=48, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--num-classes', default=10, type=int, metavar='N',
+parser.add_argument('-t-b', '--test-batch-size', default=128, type=int,
+                    metavar='N',
+                    help='mini-batch size (default: 256), this is the total '
+                         'batch size of all GPUs on the current node when '
+                         'using Data Parallel or Distributed Data Parallel')
+parser.add_argument('--num-classes', default=7, type=int, metavar='N',
                     help='number of classes')
+parser.add_argument('-pretrain', '--pretrain', dest='pretrain', action='store_true', default=True,
+                    help='pretrain')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--drop', '--dropout', default=0, type=float,
@@ -70,10 +82,14 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('-c', '--checkpoint', default='./result', type=str,
+parser.add_argument('-c', '--checkpoint', default='../result', type=str,
                     metavar='PATH',
                     help='path to save checkpoint (default: checkpoint)')
-parser.add_argument('--resume', default='./result/vgg19_bn/checkpoint.pth.tar', type=str,
+parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=True,
+                    help='loding by latest checkpoint')
+parser.add_argument('--resume-path',
+                    default='',
+                    type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true', default=False,
@@ -96,17 +112,26 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 
+args = parser.parse_args()
 best_acc1 = 0
 
 logger = logging.getLogger(parser.description)
+uuid = shortuuid.uuid()
+# checkpoint = os.path.join(args.checkpoint, args.arch + '_' + str(args.depth) + '_' + uuid)
+pretrain_str = '_pretrain' if args.pretrain else ''
+checkpoint_name = args.arch + '_' + str(args.dataset) + pretrain_str + '_' + uuid
+checkpoint = os.path.join(args.checkpoint, checkpoint_name)
+if args.resume and args.resume_path:
+    roots = args.resume_path.split(os.sep)
+    uuid = (roots[-2]).split('_')[-1]
+    checkpoint_name = roots[-2]
+    checkpoint = os.sep.join(roots[:-1])
+writer = SummaryWriter('runs/' + checkpoint_name)
 
 
 def main():
+    torch.set_default_tensor_type(torch.FloatTensor)
     torch.cuda.empty_cache()
-
-    args = parser.parse_args()
-
-    checkpoint = os.path.join(args.checkpoint, args.arch + str(args.depth) + '')
     if not os.path.isdir(checkpoint):
         '''make dir if not exist'''
         os.makedirs(checkpoint)
@@ -188,7 +213,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
             widen_factor=args.widen_factor,
             dropRate=args.drop,
         )
-    elif args.arch.startswith('densenet'):
+    elif args.arch.endswith('densenet'):
         model = models.__dict__[args.arch](
             num_classes=args.num_classes,
             depth=args.depth,
@@ -203,11 +228,11 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
             widen_factor=args.widen_factor,
             dropRate=args.drop,
         )
-    elif args.arch.startswith('resnet'):
+    elif args.arch.endswith('resnet'):
         model = models.__dict__[args.arch](
             num_classes=args.num_classes,
-            depth=args.depth,
-            block_name=args.block_name,
+            # depth=args.depth,
+            # block_name=args.block_name,
         )
     else:
         model = models.__dict__[args.arch](num_classes=args.num_classes)
@@ -243,28 +268,30 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         else:
             model = torch.nn.DataParallel(model).cuda()
     # view the visualization of the model
-    summary(model, input_size=(3, 32, 32))
+    summary(model, input_size=(3, 224, 224))
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    criterion = nn.BCELoss().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+    # optimizer = torch.optim.Adam(model.parameters(), args.lr,
+    #                              weight_decay=args.weight_decay)
 
     # optionally resume from a checkpoint
-    if args.start_epoch != 0:
+    if args.resume and args.start_epoch != 0:
         # optionally resume from a checkpoint of specific epoch
-        args.resume = '/'.join(args.resume.split('/')[:-1]) + '/checkpoint_epoch' + str(
+        args.resume_path = os.sep.join(args.resume_path.split(os.sep)[:-1]) + '/checkpoint_epoch' + str(
             args.start_epoch - 1) + '.pth.tar'
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
+    if args.resume and args.resume_path:
+        if os.path.isfile(args.resume_path):
+            print("=> loading checkpoint '{}'".format(args.resume_path))
             if args.gpu is None:
-                checkpoint = torch.load(args.resume)
+                checkpoint = torch.load(args.resume_path)
             else:
                 # Map model to be loaded to specified single gpu.
                 loc = 'cuda:{}'.format(args.gpu)
-                checkpoint = torch.load(args.resume, map_location=loc)
+                checkpoint = torch.load(args.resume_path, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
@@ -273,27 +300,67 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+                  .format(args.resume_path, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print("=> no checkpoint found at '{}'".format(args.resume_path))
 
     cudnn.benchmark = True
 
     # Data loading code
     print('==> Preparing dataset')
+    normalize = transforms.Normalize([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    if args.pretrain:
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+    if args.dataset == 'cifar10':
+        normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
+        # transforms.RandomCrop(32, padding=4),
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        normalize,
     ])
 
     transform_test = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        normalize,
     ])
-    trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
+    if args.dataset == 'cifar10':
+        trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+        testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
+        valset = testset
+    elif args.dataset == 'voc2007':
+        trainset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
+                                     img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
+                                     imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+                                     label_type='voc', transform=transform_train)
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
+                                    img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
+                                    imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+                                    train_type='test',
+                                    label_type='voc',
+                                    transform=transform_test)
+        valset = testset
+    elif args.dataset == 'strawberry_disease':
+        trainset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\train',
+                                     img_root_path='D:\Datasets\strawberry\image\disease\\train\JPEGImages',
+                                     transform=transform_train)
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
+                                    img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
+                                    transform=transform_test)
+        valset = testset
+    elif args.dataset == 'strawberry_normal':
+        trainset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\train',
+                                     img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
+                                     transform=transform_train)
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
+                                    img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
+                                    transform=transform_test)
+        valset = testset
+    else:
+        trainset, valset, testset = None, None, None
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
@@ -302,8 +369,10 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
 
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=(train_sampler is None),
                                                num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-    val_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False,
+    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.test_batch_size, shuffle=False,
                                              num_workers=args.workers, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False,
+                                              num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
@@ -315,15 +384,14 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
-
+        train_loss, train_metric = train(train_loader, model, criterion, optimizer, args, epoch)
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        val_loss, val_metric = validate(val_loader, model, criterion, args, epoch)
 
         # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
-
+        is_best = val_metric > best_acc1
+        best_acc1 = max(val_metric, best_acc1)
+        if is_best: print('Epoch ' + str(epoch) + ', this is the best yet.')
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                                                     and args.rank % ngpus_per_node == 0):
             save_checkpoint({
@@ -333,23 +401,26 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                 'best_acc1': best_acc1,
                 'optimizer': optimizer.state_dict(),
             }, is_best, checkpoint_path)
+        writer.add_scalars('epoch_loss', {'train': train_loss, 'test': val_loss}, epoch)
+        writer.add_scalars('epoch_f2_score', {'train': train_metric, 'test': val_metric}, epoch)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, criterion, optimizer, args, epoch):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data loading time', ':6.3f')
     losses = AverageMeter('Loss', ':f')
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+    f2 = AverageMeter('f2', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, f2],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
 
     end = time.time()
+
+    lenth = len(train_loader)
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -364,10 +435,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        f2_val = f2_score(output > 0.5, target)
         losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
+        f2.update(f2_val, images.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -377,25 +447,27 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-
-        if i % args.print_freq == 0:
+        writer.add_scalars('iteration_loss', {'train': loss.item() / images.size(0)}, epoch * lenth + i)
+        if i % args.print_freq == 0 or i == (lenth - 1):
             progress.display(i)
+    writer.add_histogram('last_layer', list(model.parameters())[0], epoch)
     print()
+    return losses.avg, f2.avg
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, args, epoch=None):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':f')
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
+    f2 = AverageMeter('f2', ':6.2f')
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, top1, top5],
-        prefix='Test: ')
+        [batch_time, losses, f2],
+        prefix='Val: ')
 
     # switch to evaluate mode
     model.eval()
 
+    lenth = len(val_loader)
     with torch.no_grad():
         end = time.time()
         for i, (images, target) in enumerate(val_loader):
@@ -409,36 +481,38 @@ def validate(val_loader, model, criterion, args):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            f2_val = f2_score(output > 0.5, target)
             losses.update(loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+            f2.update(f2_val, images.size(0))
+
 
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-
-            if i % args.print_freq == 0:
+            if epoch is not None:
+                writer.add_scalars('iteration_loss', {'test': loss.item() / images.size(0)},
+                                   epoch * lenth + i)
+            if i % args.print_freq == 0 or i == (lenth - 1):
                 progress.display(i)
         print()
         # TODO: this should also be done with the ProgressMeter
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+        print(' * F2 {f2.avg:.3f}'
+              .format(f2=f2))
 
-    return top1.avg
+    return losses.avg,f2.avg
 
 
 def save_checkpoint(state, is_best, checkpoint='checkpoint', filename=None, filename_best=None):
     if filename is None:
         filename = 'checkpoint_epoch' + str(state['epoch'] - 1) + '.pth.tar'
-    if filename_best is None:
-        filename_best = 'model_best_epoch' + str(state['epoch'] - 1) + '.pth.tar'
+    # if filename_best is None:
+    #     filename_best = 'model_best_epoch' + str(state['epoch'] - 1) + '.pth.tar'
     filepath = os.path.join(checkpoint, 'checkpoint.pth.tar')
     torch.save(state, filepath)
     shutil.copyfile(filepath, os.path.join(checkpoint, filename))
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
-        shutil.copyfile(filepath, os.path.join(checkpoint, filename_best))
+        # shutil.copyfile(filepath, os.path.join(checkpoint, filename_best))
 
 
 class AverageMeter(object):
@@ -509,6 +583,32 @@ def accuracy(output, target, topk=(1,)):
         return res
 
 
+def f2_score(output, target, mask=None):
+    if mask is not None:
+        if len(output.shape) == 2:
+            mask = torch.ByteTensor([mask, ] * output.shape[0])
+        output = output[mask]
+        target = target[mask]
+    tp = 0
+    tn = 0
+    fn = 0
+    fp = 0
+    # TP    predict 和 label 同时为1
+    tp += ((output == 1) & (target.data == 1)).sum()
+    # TN    predict 和 label 同时为0
+    tn += ((output == 0) & (target.data == 0)).sum()
+    # FN    predict 0 label 1
+    fn += ((output == 0) & (target.data == 1)).sum()
+    # FP    predict 1 label 0
+    fp += ((output == 1) & (target.data == 0)).sum()
+
+    acc = (tp + tn) / (tp + tn + fn + fp)
+    p = tp / (tp + fp)
+    r = tp / (tp + fn)
+    # F1 = 2 * r * p / (r + p)c
+    lamba_ = 2
+    f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
+    return f2
 class _LoggerFileWrapper(TextIOBase):
     """
     sys.stdout = _LoggerFileWrapper(logger_file_path)
