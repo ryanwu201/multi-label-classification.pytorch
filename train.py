@@ -9,6 +9,7 @@ import warnings
 from datetime import datetime
 from io import TextIOBase
 
+import numpy as np
 import shortuuid
 import torch
 import torch.backends.cudnn as cudnn
@@ -21,6 +22,7 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 from prettytable import PrettyTable
+from sklearn.metrics import fbeta_score
 from torch.utils.tensorboard import SummaryWriter
 from torchsummary import summary
 from torchvision import datasets
@@ -92,6 +94,8 @@ parser.add_argument('--resume-path',
                     type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
+parser.add_argument('-infer', '--inference', dest='inference', action='store_true', default=False,
+                    help='inference model on validation set')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true', default=False,
                     help='evaluate model on validation set')
 parser.add_argument('--world-size', default=-1, type=int,
@@ -367,6 +371,9 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
     else:
         train_sampler = None
 
+    if args.inference:
+        inference(transform_test, model, criterion, args)
+        return
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=(train_sampler is None),
                                                num_workers=args.workers, pin_memory=True, sampler=train_sampler)
     val_loader = torch.utils.data.DataLoader(valset, batch_size=args.test_batch_size, shuffle=False,
@@ -374,8 +381,10 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
     test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False,
                                               num_workers=args.workers, pin_memory=True)
 
+    threshold = AverageMeter('threshold', '', 'list')
+    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]))
     if args.evaluate:
-        validate(val_loader, model, criterion, args)
+        validate(val_loader, model, criterion, args, threshold)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -386,7 +395,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         # train for one epoch
         train_loss, train_metric = train(train_loader, model, criterion, optimizer, args, epoch)
         # evaluate on validation set
-        val_loss, val_metric = validate(val_loader, model, criterion, args, epoch)
+        val_loss, val_metric = validate(val_loader, model, criterion, args, threshold, epoch)
 
         # remember best acc@1 and save checkpoint
         is_best = val_metric > best_acc1
@@ -455,13 +464,13 @@ def train(train_loader, model, criterion, optimizer, args, epoch):
     return losses.avg, f2.avg
 
 
-def validate(val_loader, model, criterion, args, epoch=None):
+def validate(val_loader, model, criterion, args, threshold, epoch=None):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':f')
     f2 = AverageMeter('f2', ':6.2f')
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, f2],
+        [batch_time, losses, f2, threshold],
         prefix='Val: ')
 
     # switch to evaluate mode
@@ -470,6 +479,17 @@ def validate(val_loader, model, criterion, args, epoch=None):
     lenth = len(val_loader)
     with torch.no_grad():
         end = time.time()
+        # optimal threshold
+        if args.evaluate is not True:
+            for i, (image, target) in enumerate(val_loader):
+                if args.gpu is not None:
+                    image = image.cuda(args.gpu, non_blocking=True)
+                if torch.cuda.is_available():
+                    target = target.cuda(args.gpu, non_blocking=True)
+                # compute output
+                output = model(image)
+                threshold_val = get_optimal_threshold(target.cpu().numpy(), output.cpu().numpy())
+                threshold.update(np.array(threshold_val))
         for i, (images, target) in enumerate(val_loader):
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
@@ -481,10 +501,9 @@ def validate(val_loader, model, criterion, args, epoch=None):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            f2_val = f2_score(output > 0.5, target)
+            f2_val = f2_score(output > torch.tensor(threshold.avg).cuda(args.gpu), target)
             losses.update(loss.item(), images.size(0))
             f2.update(f2_val, images.size(0))
-
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -499,7 +518,108 @@ def validate(val_loader, model, criterion, args, epoch=None):
         print(' * F2 {f2.avg:.3f}'
               .format(f2=f2))
 
-    return losses.avg,f2.avg
+    return losses.avg, f2.avg
+
+
+def inference(transform_test, model, criterion, args):
+    if args.dataset == 'voc2007':
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
+                                    img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
+                                    imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+                                    train_type='train',
+                                    label_type='voc',
+                                    transform=transform_test)
+        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
+                                         img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
+                                         imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+                                         train_type='train',
+                                         label_type='voc',
+                                         transform=None)
+    elif args.dataset == 'strawberry_disease':
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
+                                    img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
+                                    transform=transform_test, requires_filename=True)
+        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
+                                         img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
+                                         transform=None, requires_filename=True)
+    elif args.dataset == 'strawberry_normal':
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
+                                    img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
+                                    transform=transform_test, requires_filename=True)
+
+        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
+                                         img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
+                                         transform=None, requires_filename=True)
+    else:
+        testset, inferenceset = None, None
+
+    val_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False,
+                                             num_workers=args.workers, pin_memory=True)
+    batch_time = AverageMeter('Time', ':6.3f')
+    losses = AverageMeter('Loss', ':f')
+    f2 = AverageMeter('f2', ':6.2f')
+    threshold = AverageMeter('threshold', '', 'list')
+    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]))
+    progress = ProgressMeter(
+        len(testset),
+        [batch_time, losses, f2, threshold],
+        prefix='inference: ')
+
+    one_hot_map = inferenceset.get_one_hot_map()
+    data = open(os.path.join(checkpoint, 'inference.txt'), 'a', encoding="utf-8")
+    lenth = len(val_loader)
+    with torch.no_grad():
+        end = time.time()
+        tp, tn, fn, fp = dict(), dict(), dict(), dict()
+        print('threshold:', threshold.avg, file=data)
+
+        for i, (image, target, filename) in enumerate(testset):
+            if args.gpu is not None:
+                image = image.cuda(args.gpu, non_blocking=True)
+            if torch.cuda.is_available():
+                target = target.cuda(args.gpu, non_blocking=True)
+            # compute output
+            if len(image.shape) < 4:
+                image = image.unsqueeze(0)
+                target = target.unsqueeze(0)
+            output = model(image)
+            loss = criterion(output, target)
+
+            # measure accuracy and record loss
+            f2_val = f2_score(output > torch.tensor(threshold.avg).cuda(args.gpu), target)
+            for label, one_hot in one_hot_map.items():
+                if label not in tp:
+                    tp[label], tn[label], fn[label], fp[label] = 0, 0, 0, 0
+                tp_, tn_, fn_, fp_, _, _, _, _ = compute_evaluation_metric(
+                    output > torch.tensor(threshold.avg).cuda(args.gpu), target,
+                    mask=one_hot)
+                tp[label] += tp_
+                tn[label] += tn_
+                fn[label] += fn_
+                fp[label] += fp_
+            losses.update(loss.item(), image.size(0))
+            f2.update(f2_val, image.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if i % args.print_freq == 0 or i == (lenth - 1):
+                progress.display(i)
+        result_table = PrettyTable()
+        result_table.field_names = ["label", "tp", 'tn', 'fp', 'fn', 'accuracy', 'precision', 'recall', 'f2']
+        f2s = dict()
+        for label, _ in one_hot_map.items():
+            acc, p, r, f2__ = compute_evaluation_metric2(tp[label], tn[label], fn[label], fp[label],
+                                                         {'a', 'p', 'r', 'f2'})
+            result_table.add_row(
+                [label, tp[label].cpu().numpy(), tn[label].cpu().numpy(), fp[label].cpu().numpy(),
+                 fn[label].cpu().numpy(), acc.cpu().numpy(), p.cpu().numpy(), r.cpu().numpy(),
+                 f2__.cpu().numpy()])
+            f2s[label] = f2__.cpu().numpy()
+        print('\n' + str(result_table))
+        print('\n' + str(result_table), file=data)
+    return f2.avg
 
 
 def save_checkpoint(state, is_best, checkpoint='checkpoint', filename=None, filename_best=None):
@@ -518,18 +638,27 @@ def save_checkpoint(state, is_best, checkpoint='checkpoint', filename=None, file
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
-    def __init__(self, name, fmt=':f'):
+    def __init__(self, name, fmt=':f', type='number'):
         self.name = name
         self.fmt = fmt
         self.reset()
+        self.type = type
 
     def reset(self):
         self.val = 0
         self.avg = 0
         self.sum = 0
         self.count = 0
+        if self.name == 'threshold':
+            self.avg = 0.5
 
     def update(self, val, n=1):
+        # if self.name == 'threshold':
+        #     return
+        if self.count == 0 and self.type == 'list':
+            self.val = np.zeros(val.shape)
+            self.avg = np.zeros(val.shape)
+            self.sum = np.zeros(val.shape)
         self.val = val
         self.sum += val * n
         self.count += n
@@ -609,6 +738,99 @@ def f2_score(output, target, mask=None):
     lamba_ = 2
     f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
     return f2
+
+
+def compute_evaluation_metric(output, target, metrics=None, mask=None):
+    if metrics is None:
+        metrics = {'a'}
+    if mask is not None:
+        if len(output.shape) == 2:
+            mask = torch.ByteTensor([mask, ] * output.shape[0])
+        output = output[mask]
+        target = target[mask]
+    tp = 0
+    tn = 0
+    fn = 0
+    fp = 0
+    # TP    predict 和 label 同时为1
+    tp += ((output == 1) & (target.data == 1)).sum()
+    # TN    predict 和 label 同时为0
+    tn += ((output == 0) & (target.data == 0)).sum()
+    # FN    predict 0 label 1
+    fn += ((output == 0) & (target.data == 1)).sum()
+    # FP    predict 1 label 0
+    fp += ((output == 1) & (target.data == 0)).sum()
+
+    acc = None
+    p = None
+    r = None
+    f2 = None
+    if 'a' in metrics:
+        acc = (tp + tn) / (tp + tn + fn + fp)
+    if 'p' in metrics or 'f2' in metrics:
+        # if tp == 0:
+        #     p = 0
+        # else:
+        p = tp / (tp + fp)
+    if 'r' in metrics or 'f2' in metrics:
+        # if tp == 0:
+        #     r = 0
+        # else:
+        r = tp / (tp + fn)
+    # F1 = 2 * r * p / (r + p)
+
+    if 'f2' in metrics:
+        lamba_ = 2
+        f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
+    return tp, tn, fn, fp, acc, p, r, f2
+
+
+def compute_evaluation_metric2(tp, tn, fn, fp, metrics=None):
+    if metrics is None:
+        metrics = {'a'}
+    acc = None
+    p = None
+    r = None
+    f2 = None
+    if 'a' in metrics:
+        acc = (tp + tn) / (tp + tn + fn + fp)
+    if 'p' in metrics or 'f2' in metrics:
+        # if tp == 0:
+        #     p = 0
+        # else:
+        p = tp / (tp + fp)
+    if 'r' in metrics or 'f2' in metrics:
+        # if tp == 0:
+        #     r = 0
+        # else:
+        r = tp / (tp + fn)
+    # F1 = 2 * r * p / (r + p)
+
+    if 'f2' in metrics:
+        lamba_ = 2
+        f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
+    return acc, p, r, f2
+
+
+def fbeta(true_label, prediction):
+    return fbeta_score(true_label, prediction, beta=2, average='samples')
+
+
+def get_optimal_threshold(true_label, prediction, iterations=100, metric=fbeta):
+    best_threshold = [0.2] * args.num_classes
+    for t in range(args.num_classes):
+        best_metric = 0
+        temp_threshold = [0.2] * args.num_classes
+        for i in range(iterations):
+            temp_value = i / float(iterations)
+            temp_threshold[t] = temp_value
+            temp_metric = metric(true_label, prediction > temp_threshold)
+            if temp_metric > best_metric:
+                best_metric = temp_metric
+                best_threshold[t] = temp_value
+    return best_threshold
+
+
 class _LoggerFileWrapper(TextIOBase):
     """
     sys.stdout = _LoggerFileWrapper(logger_file_path)
@@ -638,3 +860,12 @@ if __name__ == '__main__':
     # target = torch.tensor([[1],
     #                        [0]]).squeeze()
     # accuracy(output, target, (1, 2))
+    # threshold = AverageMeter('threshold', ':6.f', 'list')
+    # for i in range(10):
+    # x = np.array([1, 2, 3, 4, 5, 6])
+    # threshold.update(x)
+    # x = np.array([2, 2, 3, 4, 5, 6])
+    # threshold.update(x)
+    # x = np.array([3, 2, 1, 4, 5, 6])
+    # threshold.update(x)
+    # print(threshold.avg)
