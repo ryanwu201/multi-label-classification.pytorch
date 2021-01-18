@@ -9,6 +9,8 @@ import warnings
 from datetime import datetime
 from io import TextIOBase
 
+import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import shortuuid
 import torch
@@ -34,11 +36,11 @@ model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch Cifar10 Training')
+parser = argparse.ArgumentParser(description='PyTorch Classification Training')
 parser.add_argument('-data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-dataset', type=str, default='strawberry_disease', help='dataset')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='se_resnet18',
                     choices=model_names,
                     help='model architecture: ' +
                          ' | '.join(model_names) +
@@ -66,7 +68,7 @@ parser.add_argument('-t-b', '--test-batch-size', default=128, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--num-classes', default=7, type=int, metavar='N',
+parser.add_argument('--num-classes', default=5, type=int, metavar='N',
                     help='number of classes')
 parser.add_argument('-pretrain', '--pretrain', dest='pretrain', action='store_true', default=True,
                     help='pretrain')
@@ -74,7 +76,7 @@ parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--drop', '--dropout', default=0, type=float,
                     metavar='Dropout', help='Dropout ratio')
-parser.add_argument('--schedule', type=int, nargs='+', default=[81, 122],
+parser.add_argument('--schedule', type=int, nargs='+', default=[-1],
                     help='Decrease learning rate at these epochs.')
 parser.add_argument('--gamma', type=float, default=0.1, help='LR is multiplied by gamma on schedule.')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -94,6 +96,8 @@ parser.add_argument('--resume-path',
                     type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
+parser.add_argument('-visualize', '--visualize', dest='visualize', action='store_true', default=False,
+                    help='visualize model on validation set when inference time')
 parser.add_argument('-infer', '--inference', dest='inference', action='store_true', default=False,
                     help='inference model on validation set')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true', default=False,
@@ -363,6 +367,19 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                     img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
                                     transform=transform_test)
         valset = testset
+    elif args.dataset == 'strawberry_new':
+        trainset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\train.csv',
+                                     img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
+                                     label_type='csv',
+                                     transform=transform_train)
+        valset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\val.csv',
+                                   img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
+                                   label_type='csv',
+                                   transform=transform_test)
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
+                                    label_type='csv',
+                                    img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
+                                    transform=transform_test)
     else:
         trainset, valset, testset = None, None, None
 
@@ -382,7 +399,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                               num_workers=args.workers, pin_memory=True)
 
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5]))
     if args.evaluate:
         validate(val_loader, model, criterion, args, threshold)
         return
@@ -550,6 +567,15 @@ def inference(transform_test, model, criterion, args):
         inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
                                          img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
                                          transform=None, requires_filename=True)
+    elif args.dataset == 'strawberry_new':
+        testset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
+                                    label_type='csv',
+                                    img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
+                                    transform=transform_test, requires_filename=True)
+        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
+                                         label_type='csv',
+                                         img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
+                                         transform=None, requires_filename=True)
     else:
         testset, inferenceset = None, None
 
@@ -559,11 +585,12 @@ def inference(transform_test, model, criterion, args):
     losses = AverageMeter('Loss', ':f')
     f2 = AverageMeter('f2', ':6.2f')
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5]))
     progress = ProgressMeter(
         len(testset),
         [batch_time, losses, f2, threshold],
         prefix='inference: ')
+    _CAMGenerator = CAMGenerator('layer4', model)
 
     one_hot_map = inferenceset.get_one_hot_map()
     data = open(os.path.join(checkpoint, 'inference.txt'), 'a', encoding="utf-8")
@@ -597,6 +624,50 @@ def inference(transform_test, model, criterion, args):
                 tn[label] += tn_
                 fn[label] += fn_
                 fp[label] += fp_
+                if not args.visualize: continue
+                # result text per image
+                title_table = PrettyTable([''] + sorted(one_hot_map.keys()))
+                title_table.add_row(['after sigmoid'] + [str(i) for i in output.cpu().numpy()[0]])
+                title_table.add_row(['prediction'] + [str(i) for i in (
+                        output > torch.tensor(threshold.avg).cuda(args.gpu)).cpu().int().numpy()[0]])
+                title_table.add_row(['target'] + [str(i) for i in target.cpu().int().numpy()[0]])
+
+                # generate class activation mapping
+                class_idx = [np.argmax(one_hot)]
+                CAMs = _CAMGenerator.generate(i, class_idx)
+
+                # get origin image
+                origin_image = np.array(inferenceset[i][0])
+                origin_image = cv2.cvtColor(origin_image, cv2.COLOR_BGR2RGB)
+                width, height = origin_image.shape[0], origin_image.shape[1]
+                result = torch.tensor(origin_image)
+
+                for j in range(len(class_idx)):
+                    heatmap = cv2.applyColorMap(cv2.resize(CAMs[j], (width, height)), cv2.COLORMAP_JET)
+                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+                    heatmap_ = cv2.addWeighted(origin_image, 0.3, heatmap, 0.7, 0)
+                    result = torch.cat([result, torch.tensor(heatmap_)], 1)
+
+                # plot class activation map
+                plt.rcParams['font.sans-serif'] = ['Courier New']
+                plt.imshow(result)
+                plt.xticks([])
+                plt.yticks([])
+                plt.xlabel(str(title_table))
+                plt.title(filename.split('.')[0])
+
+                # save class activation map fig
+                type_ = 'unknown'
+                type_ = 'tp' if tp_ > 0 else type_
+                type_ = 'tn' if tn_ > 0 else type_
+                type_ = 'fp' if fp_ > 0 else type_
+                type_ = 'fn' if fn_ > 0 else type_
+                save_path = os.path.join(checkpoint, 'inference' + os.sep + label + os.sep + type_)
+                if not os.path.isdir(save_path):
+                    '''make dir if not exist'''
+                    os.makedirs(save_path)
+                plt.savefig(os.path.join(save_path, filename), bbox_inches='tight')
+
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
 
@@ -606,6 +677,8 @@ def inference(transform_test, model, criterion, args):
 
             if i % args.print_freq == 0 or i == (lenth - 1):
                 progress.display(i)
+
+        # result per label
         result_table = PrettyTable()
         result_table.field_names = ["label", "tp", 'tn', 'fp', 'fn', 'accuracy', 'precision', 'recall', 'f2']
         f2s = dict()
@@ -619,6 +692,12 @@ def inference(transform_test, model, criterion, args):
             f2s[label] = f2__.cpu().numpy()
         print('\n' + str(result_table))
         print('\n' + str(result_table), file=data)
+        # result
+        f2_table = PrettyTable(['', 'crown', 'flower', 'fruit', 'leaf', 'stem or runner', 'mean'])
+        mean = (f2s['crown'] + f2s['flower'] + f2s['fruit'] + f2s['leaf'] + f2s['stem or runner']) / 5
+        f2_table.add_row(['f2', f2s['crown'], f2s['flower'], f2s['fruit'], f2s['leaf'], f2s['stem or runner'], mean])
+        print('\n' + str(f2_table))
+        print('\n' + str(f2_table), file=data)
     return f2.avg
 
 
@@ -850,6 +929,42 @@ class _LoggerFileWrapper(TextIOBase):
             self.file.write('[{}] PRINT '.format(cur_time) + s + '\n')
             self.file.flush()
         return len(s)
+
+
+class CAMGenerator:
+    def __init__(self, finalconv_name, model):
+        self.finalconv_name = finalconv_name
+        self.model = model
+        # switch to evaluate mode
+        self.model.eval()
+
+        # hook the feature extractor
+        self.features_blobs = []
+        me = self
+
+        def hook_feature(module, input, output):
+            me.features_blobs.append(output.data.cpu().numpy())
+
+        self.model._modules.get(finalconv_name).register_forward_hook(hook_feature)
+
+        # get the softmax weight
+        params = list(self.model.parameters())
+        self.weight_softmax = np.squeeze(params[-2].cpu().data.numpy())
+
+    def generate(self, feature_conv_index, class_idx):
+        feature_conv = self.features_blobs[feature_conv_index]
+        # generate the class activation maps upsample to 256x256
+        size_upsample = (256, 256)
+        bz, nc, h, w = feature_conv.shape
+        output_cam = []
+        for idx in class_idx:
+            cam = self.weight_softmax[idx].dot(feature_conv.reshape((nc, h * w)))
+            cam = cam.reshape(h, w)
+            cam = cam - np.min(cam)
+            cam_img = cam / np.max(cam)
+            cam_img = np.uint8(255 * cam_img)
+            output_cam.append(cv2.resize(cam_img, size_upsample))
+        return output_cam
 
 
 if __name__ == '__main__':
