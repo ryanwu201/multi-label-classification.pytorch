@@ -39,7 +39,7 @@ model_names = sorted(name for name in models.__dict__
 parser = argparse.ArgumentParser(description='PyTorch Classification Training')
 parser.add_argument('-data', metavar='DIR',
                     help='path to dataset')
-parser.add_argument('-dataset', type=str, default='strawberry_disease', help='dataset')
+parser.add_argument('-dataset', type=str, default='strawberry_03_05', help='dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='se_resnet18',
                     choices=model_names,
                     help='model architecture: ' +
@@ -54,11 +54,11 @@ parser.add_argument('--growthRate', type=int, default=12, help='Growth rate for 
 parser.add_argument('--compressionRate', type=int, default=2, help='Compression Rate (theta) for DenseNet.')
 parser.add_argument('-j', '--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=2, type=int, metavar='N',
+parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=48, type=int,
+parser.add_argument('-b', '--batch-size', default=64, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -68,7 +68,7 @@ parser.add_argument('-t-b', '--test-batch-size', default=128, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--num-classes', default=5, type=int, metavar='N',
+parser.add_argument('--num-classes', default=3, type=int, metavar='N',
                     help='number of classes')
 parser.add_argument('-pretrain', '--pretrain', dest='pretrain', action='store_true', default=True,
                     help='pretrain')
@@ -86,9 +86,13 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('-c', '--checkpoint', default='../result', type=str,
+parser.add_argument('-c', '--checkpoint', default='../' + sys.path[0].split(os.sep)[-1] + '_result', type=str,
                     metavar='PATH',
                     help='path to save checkpoint (default: checkpoint)')
+parser.add_argument('-tensorboard-path', '-tensorboard-path', default='../' + sys.path[0].split(os.sep)[-1] + '_runs',
+                    type=str,
+                    metavar='PATH',
+                    help='path to save tensorboard output')
 parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=True,
                     help='loding by latest checkpoint')
 parser.add_argument('--resume-path',
@@ -134,7 +138,7 @@ if args.resume and args.resume_path:
     uuid = (roots[-2]).split('_')[-1]
     checkpoint_name = roots[-2]
     checkpoint = os.sep.join(roots[:-1])
-writer = SummaryWriter('runs/' + checkpoint_name)
+writer = SummaryWriter(os.path.join(args.tensorboard_path, checkpoint_name))
 
 
 def main():
@@ -145,7 +149,9 @@ def main():
         os.makedirs(checkpoint)
     # log
     logger.setLevel(level=logging.DEBUG)
-    handler = logging.FileHandler(os.path.join(checkpoint, "log.txt"))
+    log_file_name = "log.txt"
+    log_file_name = 'inference.txt' if args.inference else log_file_name
+    handler = logging.FileHandler(os.path.join(checkpoint, log_file_name))
     handler.setLevel(logging.DEBUG)
     formatter = logging.Formatter('[%(asctime)s] %(levelname)s (%(name)s/%(threadName)s) %(message)s')
     handler.setFormatter(formatter)
@@ -276,7 +282,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         else:
             model = torch.nn.DataParallel(model).cuda()
     # view the visualization of the model
-    summary(model, input_size=(3, 224, 224))
+    summary(model, input_size=(3, 419, 419))
     # define loss function (criterion) and optimizer
     criterion = nn.BCELoss().cuda(args.gpu)
 
@@ -324,14 +330,16 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     transform_train = transforms.Compose([
         # transforms.RandomCrop(32, padding=4),
-        transforms.Resize((224, 224)),
+        transforms.Resize((419, 419)),
         transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(180),
+        transforms.ColorJitter(0.5, 0.5, 0.5),
         transforms.ToTensor(),
         normalize,
     ])
 
     transform_test = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((419, 419)),
         transforms.ToTensor(),
         normalize,
     ])
@@ -380,6 +388,23 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                     label_type='csv',
                                     img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
                                     transform=transform_test)
+    elif args.dataset == 'strawberry_03_05':
+        root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
+        trainset = MultiLabelDataset(
+            label_root_path=root_path + '/train/annotations',
+            img_root_path=root_path + '/train/images',
+            label_type='naive',
+            transform=transform_train)
+        valset = MultiLabelDataset(
+            label_root_path=root_path + '/test/annotations',
+            img_root_path=root_path + '/test/images',
+            label_type='naive',
+            transform=transform_test)
+        testset = MultiLabelDataset(
+            label_root_path=root_path + '/test/annotations',
+            label_type='naive',
+            img_root_path=root_path + '/test/images',
+            transform=transform_test)
     else:
         trainset, valset, testset = None, None, None
 
@@ -399,7 +424,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                               num_workers=args.workers, pin_memory=True)
 
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5, 0.5, 0.5]))
     if args.evaluate:
         validate(val_loader, model, criterion, args, threshold)
         return
@@ -576,6 +601,18 @@ def inference(transform_test, model, criterion, args):
                                          label_type='csv',
                                          img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
                                          transform=None, requires_filename=True)
+    elif args.dataset == 'strawberry_03_05':
+        root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
+        testset = MultiLabelDataset(
+            label_root_path=root_path + '/test/annotations',
+            label_type='naive',
+            img_root_path=root_path + '/test/images',
+            transform=transform_test, requires_filename=True)
+        inferenceset = MultiLabelDataset(
+            label_root_path=root_path + '/test/annotations',
+            label_type='naive',
+            img_root_path=root_path + '/test/images',
+            transform=None, requires_filename=True)
     else:
         testset, inferenceset = None, None
 
@@ -585,7 +622,7 @@ def inference(transform_test, model, criterion, args):
     losses = AverageMeter('Loss', ':f')
     f2 = AverageMeter('f2', ':6.2f')
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5, 0.5, 0.5]))
     progress = ProgressMeter(
         len(testset),
         [batch_time, losses, f2, threshold],
@@ -593,12 +630,11 @@ def inference(transform_test, model, criterion, args):
     _CAMGenerator = CAMGenerator('layer4', model)
 
     one_hot_map = inferenceset.get_one_hot_map()
-    data = open(os.path.join(checkpoint, 'inference.txt'), 'a', encoding="utf-8")
     lenth = len(val_loader)
     with torch.no_grad():
         end = time.time()
         tp, tn, fn, fp = dict(), dict(), dict(), dict()
-        print('threshold:', threshold.avg, file=data)
+        print('threshold:', threshold.avg)
 
         for i, (image, target, filename) in enumerate(testset):
             if args.gpu is not None:
@@ -625,6 +661,7 @@ def inference(transform_test, model, criterion, args):
                 fn[label] += fn_
                 fp[label] += fp_
                 if not args.visualize: continue
+                if (tp_ == 0 and fp_ == 0 and fn_ == 0) and tn_ > 0: continue
                 # result text per image
                 title_table = PrettyTable([''] + sorted(one_hot_map.keys()))
                 title_table.add_row(['after sigmoid'] + [str(i) for i in output.cpu().numpy()[0]])
@@ -691,13 +728,11 @@ def inference(transform_test, model, criterion, args):
                  f2__.cpu().numpy()])
             f2s[label] = f2__.cpu().numpy()
         print('\n' + str(result_table))
-        print('\n' + str(result_table), file=data)
         # result
-        f2_table = PrettyTable(['', 'crown', 'flower', 'fruit', 'leaf', 'stem or runner', 'mean'])
-        mean = (f2s['crown'] + f2s['flower'] + f2s['fruit'] + f2s['leaf'] + f2s['stem or runner']) / 5
-        f2_table.add_row(['f2', f2s['crown'], f2s['flower'], f2s['fruit'], f2s['leaf'], f2s['stem or runner'], mean])
+        f2_table = PrettyTable(['', 'flower', 'fruit', 'leaf', 'mean'])
+        mean = (f2s['flower'] + f2s['fruit'] + f2s['leaf']) / args.num_classes
+        f2_table.add_row(['f2', f2s['flower'], f2s['fruit'], f2s['leaf'], mean])
         print('\n' + str(f2_table))
-        print('\n' + str(f2_table), file=data)
     return f2.avg
 
 

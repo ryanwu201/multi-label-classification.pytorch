@@ -144,7 +144,7 @@ class MultiLabelDataset(Dataset):
                               'dog', 'horse', 'motorbike', 'pottedplant',
                               'sheep', 'sofa', 'train', 'tvmonitor', 'person']
             else:
-                categories = ['crown', 'flower', 'fruit', 'stem or runner', 'leaf']
+                categories = ['flower', 'fruit', 'leaf']
             one_hot = np.eye(len(categories))
             for index, cls_name in enumerate(sorted(categories)):
                 # 每一个类对应一个one hot 编码
