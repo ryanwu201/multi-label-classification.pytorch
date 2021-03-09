@@ -38,7 +38,7 @@ class MultiLabelDataset(Dataset):
     def __init__(self, label_root_path, img_root_path, imageset_root_path=None, label_file_suffix='.txt',
                  train_type='trainval',
                  label_type='naive',
-                 transform=None, requires_filename=False):
+                 transform=None, requires_filename=False, requires_origin=False):
         """
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -63,16 +63,18 @@ class MultiLabelDataset(Dataset):
         self.img_root_path = img_root_path
         self.transform = transform
         self.requires_filename = requires_filename
+        self.requires_origin = requires_origin
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         filename, multi_labels_embeding = self.data[idx]
-        img = cv2.imread(os.path.join(self.img_root_path, filename + self.suffix))
+        origin_img = cv2.imread(os.path.join(self.img_root_path, filename + self.suffix))
         # img = io.imread(os.path.join(self.img_root_path, filename + self.suffix))
         # to return a PIL Image
-        img = Image.fromarray(img)
+        origin_img = Image.fromarray(origin_img)
+        img = origin_img
         if self.transform:
             img = self.transform(img)
         # 每次获得的图片样子形状可以在这里进行观察
@@ -82,10 +84,12 @@ class MultiLabelDataset(Dataset):
         plt.imshow(img)
         plt.show()
         """
+        result = img, torch.from_numpy(multi_labels_embeding).float()
         if self.requires_filename:
-            return img, torch.from_numpy(multi_labels_embeding).float(), filename + self.suffix
-        else:
-            return img, torch.from_numpy(multi_labels_embeding).float()
+            result = *result, filename + self.suffix
+        if self.requires_origin:
+            result = *result, origin_img
+        return result
 
     def _read_file(self, path, imageset_filenames=None):
         self.get_one_hot_map()

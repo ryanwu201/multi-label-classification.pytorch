@@ -421,16 +421,17 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
     else:
         train_sampler = None
 
-    if args.inference:
-        inference(transform_test, model, criterion, args)
-        return
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=(train_sampler is None),
                                                num_workers=args.workers, pin_memory=True, sampler=train_sampler)
     val_loader = torch.utils.data.DataLoader(valset, batch_size=args.test_batch_size, shuffle=False,
                                              num_workers=args.workers, pin_memory=True)
-    test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False,
-                                              num_workers=args.workers, pin_memory=True)
-
+    test_loader_args = {'dataset': testset, 'batch_size': args.test_batch_size, 'shuffle': False,
+                        'num_workers': args.workers,
+                        'pin_memory': True}
+    test_loader = torch.utils.data.DataLoader(**test_loader_args)
+    if args.inference:
+        inference(testset, test_loader_args, model, criterion, args)
+        return
     threshold = AverageMeter('threshold', '', 'list')
     threshold.update(np.array([0.5] * args.num_classes))
     if args.evaluate:
@@ -571,68 +572,15 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
     return losses.avg, f2.avg
 
 
-def inference(transform_test, model, criterion, args):
+def inference(testset, test_loader_args, model, criterion, args):
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-    if args.dataset == 'voc2007':
-        root_path = 'D:\Datasets\VOC\VOCdevkit'
-        if args.on_linux:
-            root_path = '/home/ryan/dataset/'
-        testset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
-                                    img_root_path=root_path + '/VOC2007/JPEGImages',
-                                    imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
-                                    train_type='test',
-                                    label_type='voc',
-                                    transform=transform_test, requires_filename=True)
-        inferenceset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
-                                         img_root_path=root_path + '/VOC2007/JPEGImages',
-                                         imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
-                                         train_type='test',
-                                         label_type='voc',
-                                         transform=None, requires_filename=True)
-    elif args.dataset == 'strawberry_disease':
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
-                                    img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
-                                    transform=transform_test, requires_filename=True)
-        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
-                                         img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
-                                         transform=None, requires_filename=True)
-    elif args.dataset == 'strawberry_normal':
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
-                                    img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
-                                    transform=transform_test, requires_filename=True)
 
-        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
-                                         img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
-                                         transform=None, requires_filename=True)
-    elif args.dataset == 'strawberry_new':
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
-                                    label_type='csv',
-                                    img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
-                                    transform=transform_test, requires_filename=True)
-        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
-                                         label_type='csv',
-                                         img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
-                                         transform=None, requires_filename=True)
-    elif args.dataset == 'strawberry_03_05':
-        root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
-        if args.on_linux:
-            root_path = '/home/ryan/dataset/multi-label-classification(strawberry)/'
-        testset = MultiLabelDataset(
-            label_root_path=root_path + '/test/annotations',
-            label_type='naive',
-            img_root_path=root_path + '/test/images',
-            transform=transform_test, requires_filename=True)
-        inferenceset = MultiLabelDataset(
-            label_root_path=root_path + '/test/annotations',
-            label_type='naive',
-            img_root_path=root_path + '/test/images',
-            transform=None, requires_filename=True)
-    else:
-        testset, inferenceset = None, None
+    testset.requires_filename = True
+    testset.requires_origin = True
+    test_loader_args['dataset'] = testset
+    test_loader = torch.utils.data.DataLoader(**test_loader_args)
 
-    val_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True)
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':f')
     f2 = AverageMeter('f2', ':6.2f')
@@ -644,14 +592,14 @@ def inference(transform_test, model, criterion, args):
         prefix='inference: ')
     _CAMGenerator = CAMGenerator('layer4', model)
 
-    one_hot_map = inferenceset.get_one_hot_map()
-    lenth = len(val_loader)
+    one_hot_map = testset.get_one_hot_map()
+    lenth = len(test_loader)
     with torch.no_grad():
         end = time.time()
         tp, tn, fn, fp = dict(), dict(), dict(), dict()
         print('threshold:', threshold.avg)
 
-        for i, (image, target, filename) in enumerate(testset):
+        for i, (image, target, filename, origin_image) in enumerate(testset):
             if args.gpu is not None:
                 image = image.cuda(args.gpu, non_blocking=True)
             if torch.cuda.is_available():
@@ -689,7 +637,7 @@ def inference(transform_test, model, criterion, args):
                 CAMs = _CAMGenerator.generate(i, class_idx)
 
                 # get origin image
-                origin_image = np.array(inferenceset[i][0])
+                origin_image = np.array(origin_image)
                 origin_image = cv2.cvtColor(origin_image, cv2.COLOR_BGR2RGB)
                 width, height = origin_image.shape[1], origin_image.shape[0]
                 result = torch.tensor(origin_image)
