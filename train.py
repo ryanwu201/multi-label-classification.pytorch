@@ -93,10 +93,10 @@ parser.add_argument('-tensorboard-path', '-tensorboard-path', default='../' + sy
                     type=str,
                     metavar='PATH',
                     help='path to save tensorboard output')
-parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=True,
+parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=False,
                     help='loding by latest checkpoint')
 parser.add_argument('--resume-path',
-                    default='../' + sys.path[0].split(os.sep)[-1] + '_result'+os.sep+''+os.sep+''+'.pth.tar',
+                    default='../' + sys.path[0].split(os.sep)[-1] + '_result' + os.sep + '' + os.sep + '' + '.pth.tar',
                     type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -844,7 +844,7 @@ def accuracy(output, target, topk=(1,)):
 def f2_score(output, target, mask=None):
     if mask is not None:
         if len(output.shape) == 2:
-            mask = torch.ByteTensor([mask, ] * output.shape[0])
+            mask = torch.BoolTensor([mask, ] * output.shape[0])
         output = output[mask]
         target = target[mask]
     tp = 0
@@ -852,13 +852,13 @@ def f2_score(output, target, mask=None):
     fn = 0
     fp = 0
     # TP    predict 和 label 同时为1
-    tp += ((output == 1) & (target.data == 1)).sum()
+    tp += ((output == 1) & (target.data == 1)).sum().float()
     # TN    predict 和 label 同时为0
-    tn += ((output == 0) & (target.data == 0)).sum()
+    tn += ((output == 0) & (target.data == 0)).sum().float()
     # FN    predict 0 label 1
-    fn += ((output == 0) & (target.data == 1)).sum()
+    fn += ((output == 0) & (target.data == 1)).sum().float()
     # FP    predict 1 label 0
-    fp += ((output == 1) & (target.data == 0)).sum()
+    fp += ((output == 1) & (target.data == 0)).sum().float()
 
     acc = (tp + tn) / (tp + tn + fn + fp)
     p = tp / (tp + fp)
@@ -874,7 +874,7 @@ def compute_evaluation_metric(output, target, metrics=None, mask=None):
         metrics = {'a'}
     if mask is not None:
         if len(output.shape) == 2:
-            mask = torch.ByteTensor([mask, ] * output.shape[0])
+            mask = torch.BoolTensor([mask, ] * output.shape[0])
         output = output[mask]
         target = target[mask]
     tp = 0
@@ -882,13 +882,13 @@ def compute_evaluation_metric(output, target, metrics=None, mask=None):
     fn = 0
     fp = 0
     # TP    predict 和 label 同时为1
-    tp += ((output == 1) & (target.data == 1)).sum()
+    tp += ((output == 1) & (target.data == 1)).sum().float()
     # TN    predict 和 label 同时为0
-    tn += ((output == 0) & (target.data == 0)).sum()
+    tn += ((output == 0) & (target.data == 0)).sum().float()
     # FN    predict 0 label 1
-    fn += ((output == 0) & (target.data == 1)).sum()
+    fn += ((output == 0) & (target.data == 1)).sum().float()
     # FP    predict 1 label 0
-    fp += ((output == 1) & (target.data == 0)).sum()
+    fp += ((output == 1) & (target.data == 0)).sum().float()
 
     acc = None
     p = None
