@@ -173,15 +173,27 @@ def se_resnet101(num_classes=1_000):
     return model
 
 
-def se_resnet152(num_classes=1_000):
-    """Constructs a ResNet-152 model.
+# def se_resnet152(num_classes=1_000):
+#     """Constructs a ResNet-152 model.
+#
+#     Args:
+#         pretrained (bool): If True, returns a model pre-trained on ImageNet
+#     """
+#     model = ResNet(SEBottleneck, [3, 8, 36, 3], num_classes=num_classes)
+#     model.avgpool = nn.AdaptiveAvgPool2d(1)
+#     return model
+
+
+def se_resnet152(pretrained=False, progress=True, **kwargs):
+    r"""ResNet-18 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
 
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
     """
-    model = ResNet(SEBottleneck, [3, 8, 36, 3], num_classes=num_classes)
-    model.avgpool = nn.AdaptiveAvgPool2d(1)
-    return model
+    return _resnet('resnet152', SEBasicBlock, [3, 8, 36, 3], pretrained, progress,
+                   **kwargs)
 
 
 class CifarSEBasicBlock(nn.Module):

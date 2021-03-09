@@ -96,7 +96,7 @@ parser.add_argument('-tensorboard-path', '-tensorboard-path', default='../' + sy
 parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=True,
                     help='loding by latest checkpoint')
 parser.add_argument('--resume-path',
-                    default='',
+                    default='../' + sys.path[0].split(os.sep)[-1] + '_result'+os.sep+''+os.sep+''+'.pth.tar',
                     type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -123,6 +123,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--on-linux', action='store_true', default=os.name == 'posix',
+                    help='System platform.')
 
 args = parser.parse_args()
 best_acc1 = 0
@@ -310,6 +312,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
+                best_acc1 = torch.tensor(best_acc1)
                 best_acc1 = best_acc1.to(args.gpu)
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -348,13 +351,16 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
         valset = testset
     elif args.dataset == 'voc2007':
-        trainset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
-                                     img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
-                                     imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+        root_path = 'D:\Datasets\VOC\VOCdevkit'
+        if args.on_linux:
+            root_path = '/home/ryan/dataset/'
+        trainset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
+                                     img_root_path=root_path + '/VOC2007/JPEGImages',
+                                     imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
                                      label_type='voc', transform=transform_train)
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
-                                    img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
-                                    imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
+        testset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
+                                    img_root_path=root_path + '/VOC2007/JPEGImages',
+                                    imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
                                     train_type='test',
                                     label_type='voc',
                                     transform=transform_test)
@@ -390,6 +396,8 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                     transform=transform_test)
     elif args.dataset == 'strawberry_03_05':
         root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
+        if args.on_linux:
+            root_path = '/home/ryan/dataset/multi-label-classification(strawberry)/'
         trainset = MultiLabelDataset(
             label_root_path=root_path + '/train/annotations',
             img_root_path=root_path + '/train/images',
@@ -424,7 +432,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                               num_workers=args.workers, pin_memory=True)
 
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5] * args.num_classes))
     if args.evaluate:
         validate(val_loader, model, criterion, args, threshold)
         return
@@ -564,19 +572,24 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
 
 
 def inference(transform_test, model, criterion, args):
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
     if args.dataset == 'voc2007':
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
-                                    img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
-                                    imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
-                                    train_type='train',
+        root_path = 'D:\Datasets\VOC\VOCdevkit'
+        if args.on_linux:
+            root_path = '/home/ryan/dataset/'
+        testset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
+                                    img_root_path=root_path + '/VOC2007/JPEGImages',
+                                    imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
+                                    train_type='test',
                                     label_type='voc',
-                                    transform=transform_test)
-        inferenceset = MultiLabelDataset(label_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\Annotations',
-                                         img_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\JPEGImages',
-                                         imageset_root_path='D:\Datasets\VOC\VOCdevkit\VOC2007\ImageSets\Main',
-                                         train_type='train',
+                                    transform=transform_test, requires_filename=True)
+        inferenceset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
+                                         img_root_path=root_path + '/VOC2007/JPEGImages',
+                                         imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
+                                         train_type='test',
                                          label_type='voc',
-                                         transform=None)
+                                         transform=None, requires_filename=True)
     elif args.dataset == 'strawberry_disease':
         testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
                                     img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
@@ -603,6 +616,8 @@ def inference(transform_test, model, criterion, args):
                                          transform=None, requires_filename=True)
     elif args.dataset == 'strawberry_03_05':
         root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
+        if args.on_linux:
+            root_path = '/home/ryan/dataset/multi-label-classification(strawberry)/'
         testset = MultiLabelDataset(
             label_root_path=root_path + '/test/annotations',
             label_type='naive',
@@ -622,7 +637,7 @@ def inference(transform_test, model, criterion, args):
     losses = AverageMeter('Loss', ':f')
     f2 = AverageMeter('f2', ':6.2f')
     threshold = AverageMeter('threshold', '', 'list')
-    threshold.update(np.array([0.5, 0.5, 0.5]))
+    threshold.update(np.array([0.5] * args.num_classes))
     progress = ProgressMeter(
         len(testset),
         [batch_time, losses, f2, threshold],
@@ -676,7 +691,7 @@ def inference(transform_test, model, criterion, args):
                 # get origin image
                 origin_image = np.array(inferenceset[i][0])
                 origin_image = cv2.cvtColor(origin_image, cv2.COLOR_BGR2RGB)
-                width, height = origin_image.shape[0], origin_image.shape[1]
+                width, height = origin_image.shape[1], origin_image.shape[0]
                 result = torch.tensor(origin_image)
 
                 for j in range(len(class_idx)):
@@ -770,9 +785,9 @@ class AverageMeter(object):
         # if self.name == 'threshold':
         #     return
         if self.count == 0 and self.type == 'list':
-            self.val = np.zeros(val.shape)
-            self.avg = np.zeros(val.shape)
-            self.sum = np.zeros(val.shape)
+            self.val = np.zeros(val.shape).astype(np.float32)
+            self.avg = np.zeros(val.shape).astype(np.float32)
+            self.sum = np.zeros(val.shape).astype(np.float32)
         self.val = val
         self.sum += val * n
         self.count += n
