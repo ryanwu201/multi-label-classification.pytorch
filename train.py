@@ -2,12 +2,9 @@ import argparse
 import logging
 import os
 import random
-import shutil
 import sys
 import time
 import warnings
-from datetime import datetime
-from io import TextIOBase
 
 import cv2
 import matplotlib.pyplot as plt
@@ -22,15 +19,15 @@ import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.transforms as transforms
 from prettytable import PrettyTable
-from sklearn.metrics import fbeta_score
 from torch.utils.tensorboard import SummaryWriter
 from torchsummary import summary
-from torchvision import datasets
 
 import models as models
-from dataset.BaseDataset import MultiLabelDataset
+import utils.metrics as metrics
+from dataset import prepare_dataset
+from utils import AverageMeter, ProgressMeter, LoggerFileWrapper, save_checkpoint, CAMGenerator, adjust_learning_rate, \
+    get_optimal_threshold, pass_threshold
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -126,24 +123,12 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 parser.add_argument('--on-linux', action='store_true', default=os.name == 'posix',
                     help='System platform.')
 
-args = parser.parse_args()
 best_acc1 = 0
-
-logger = logging.getLogger(parser.description)
-uuid = shortuuid.uuid()
-# checkpoint = os.path.join(args.checkpoint, args.arch + '_' + str(args.depth) + '_' + uuid)
-pretrain_str = '_pretrain' if args.pretrain else ''
-checkpoint_name = args.arch + '_' + str(args.dataset) + pretrain_str + '_' + uuid
-checkpoint = os.path.join(args.checkpoint, checkpoint_name)
-if args.resume and args.resume_path:
-    roots = args.resume_path.split(os.sep)
-    uuid = (roots[-2]).split('_')[-1]
-    checkpoint_name = roots[-2]
-    checkpoint = os.sep.join(roots[:-1])
-writer = SummaryWriter(os.path.join(args.tensorboard_path, checkpoint_name))
+writer = None
+checkpoint = None
 
 
-def main():
+def main(logger, args):
     torch.set_default_tensor_type(torch.FloatTensor)
     torch.cuda.empty_cache()
     if not os.path.isdir(checkpoint):
@@ -164,7 +149,7 @@ def main():
 
     logger.addHandler(console)
     logger.addHandler(handler)
-    sys.stdout = _LoggerFileWrapper(handler.baseFilename)
+    sys.stdout = LoggerFileWrapper(handler.baseFilename)
     # view args
     arg_table = PrettyTable()
     arg_table.field_names = ["Argument name", "Value"]
@@ -325,97 +310,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
 
     # Data loading code
     print('==> Preparing dataset')
-    normalize = transforms.Normalize([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-    if args.pretrain:
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-    if args.dataset == 'cifar10':
-        normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    transform_train = transforms.Compose([
-        # transforms.RandomCrop(32, padding=4),
-        transforms.Resize((419, 419)),
-        transforms.RandomHorizontalFlip(), transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(180),
-        transforms.ColorJitter(0.5, 0.5, 0.5),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.Resize((419, 419)),
-        transforms.ToTensor(),
-        normalize,
-    ])
-    if args.dataset == 'cifar10':
-        trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-        testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
-        valset = testset
-    elif args.dataset == 'voc2007':
-        root_path = 'D:\Datasets\VOC\VOCdevkit'
-        if args.on_linux:
-            root_path = '/home/ryan/dataset/'
-        trainset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
-                                     img_root_path=root_path + '/VOC2007/JPEGImages',
-                                     imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
-                                     label_type='voc', transform=transform_train)
-        testset = MultiLabelDataset(label_root_path=root_path + '/VOC2007/Annotations',
-                                    img_root_path=root_path + '/VOC2007/JPEGImages',
-                                    imageset_root_path=root_path + '/VOC2007/ImageSets/Main',
-                                    train_type='test',
-                                    label_type='voc',
-                                    transform=transform_test)
-        valset = testset
-    elif args.dataset == 'strawberry_disease':
-        trainset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\train',
-                                     img_root_path='D:\Datasets\strawberry\image\disease\\train\JPEGImages',
-                                     transform=transform_train)
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\disease_label\\test',
-                                    img_root_path='D:\Datasets\strawberry\image\disease\\test\JPEGImages',
-                                    transform=transform_test)
-        valset = testset
-    elif args.dataset == 'strawberry_normal':
-        trainset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\train',
-                                     img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
-                                     transform=transform_train)
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\strawberry\label\\normal_label\\test',
-                                    img_root_path='D:\Datasets\strawberry\image\\normal_dataset',
-                                    transform=transform_test)
-        valset = testset
-    elif args.dataset == 'strawberry_new':
-        trainset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\train.csv',
-                                     img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
-                                     label_type='csv',
-                                     transform=transform_train)
-        valset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\val.csv',
-                                   img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
-                                   label_type='csv',
-                                   transform=transform_test)
-        testset = MultiLabelDataset(label_root_path='D:\Datasets\multi-label-classification(strawberry)\\test.csv',
-                                    label_type='csv',
-                                    img_root_path='D:\Datasets\multi-label-classification(strawberry)\images',
-                                    transform=transform_test)
-    elif args.dataset == 'strawberry_03_05':
-        root_path = 'D:\Datasets\multi-label-classification(strawberry)\\now\split'
-        if args.on_linux:
-            root_path = '/home/ryan/dataset/multi-label-classification(strawberry)/'
-        trainset = MultiLabelDataset(
-            label_root_path=root_path + '/train/annotations',
-            img_root_path=root_path + '/train/images',
-            label_type='naive',
-            transform=transform_train)
-        valset = MultiLabelDataset(
-            label_root_path=root_path + '/test/annotations',
-            img_root_path=root_path + '/test/images',
-            label_type='naive',
-            transform=transform_test)
-        testset = MultiLabelDataset(
-            label_root_path=root_path + '/test/annotations',
-            label_type='naive',
-            img_root_path=root_path + '/test/images',
-            transform=transform_test)
-    else:
-        trainset, valset, testset = None, None, None
-
+    trainset, valset, testset = prepare_dataset(args.dataset, args.pretrain, args.on_linux)
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
     else:
@@ -495,7 +390,8 @@ def train(train_loader, model, criterion, optimizer, args, epoch):
         loss = criterion(output, target)
 
         # measure accuracy and record loss
-        f2_val = f2_score(output > 0.5, target)
+
+        f2_val = metrics.f2_score(pass_threshold(output, 0.5), target)
         losses.update(loss.item(), images.size(0))
         f2.update(f2_val, images.size(0))
 
@@ -539,7 +435,8 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
                     target = target.cuda(args.gpu, non_blocking=True)
                 # compute output
                 output = model(image)
-                threshold_val = get_optimal_threshold(target.cpu().numpy(), output.cpu().numpy())
+                threshold_val = get_optimal_threshold(target.cpu().numpy(), output.cpu().numpy(),
+                                                      num_classes=args.num_classes)
                 threshold.update(np.array(threshold_val))
         for i, (images, target) in enumerate(val_loader):
             if args.gpu is not None:
@@ -552,7 +449,7 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            f2_val = f2_score(output > torch.tensor(threshold.avg).cuda(args.gpu), target)
+            f2_val = metrics.f2_score(pass_threshold(output, threshold.avg), target)
             losses.update(loss.item(), images.size(0))
             f2.update(f2_val, images.size(0))
 
@@ -612,12 +509,12 @@ def inference(testset, test_loader_args, model, criterion, args):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            f2_val = f2_score(output > torch.tensor(threshold.avg).cuda(args.gpu), target)
+            f2_val = metrics.f2_score(pass_threshold(output, threshold.avg), target)
             for label, one_hot in one_hot_map.items():
                 if label not in tp:
                     tp[label], tn[label], fn[label], fp[label] = 0, 0, 0, 0
-                tp_, tn_, fn_, fp_, _, _, _, _ = compute_evaluation_metric(
-                    output > torch.tensor(threshold.avg).cuda(args.gpu), target,
+                tp_, tn_, fn_, fp_, _, _, _, _ = metrics.compute_evaluation_metric(
+                    pass_threshold(output, threshold.avg), target,
                     mask=one_hot)
                 tp[label] += tp_
                 tn[label] += tn_
@@ -629,7 +526,7 @@ def inference(testset, test_loader_args, model, criterion, args):
                 title_table = PrettyTable([''] + sorted(one_hot_map.keys()))
                 title_table.add_row(['after sigmoid'] + [str(i) for i in output.cpu().numpy()[0]])
                 title_table.add_row(['prediction'] + [str(i) for i in (
-                        output > torch.tensor(threshold.avg).cuda(args.gpu)).cpu().int().numpy()[0]])
+                    pass_threshold(output, threshold.avg)).cpu().int().numpy()[0]])
                 title_table.add_row(['target'] + [str(i) for i in target.cpu().int().numpy()[0]])
 
                 # generate class activation mapping
@@ -678,13 +575,15 @@ def inference(testset, test_loader_args, model, criterion, args):
             if i % args.print_freq == 0 or i == (lenth - 1):
                 progress.display(i)
 
+            if i == 10:
+                break
         # result per label
         result_table = PrettyTable()
         result_table.field_names = ["label", "tp", 'tn', 'fp', 'fn', 'accuracy', 'precision', 'recall', 'f2']
         f2s = dict()
         for label, _ in one_hot_map.items():
-            acc, p, r, f2__ = compute_evaluation_metric2(tp[label], tn[label], fn[label], fp[label],
-                                                         {'a', 'p', 'r', 'f2'})
+            acc, p, r, f2__ = metrics.compute_evaluation_metric2(tp[label], tn[label], fn[label], fp[label],
+                                                                 {'a', 'p', 'r', 'f2'})
             result_table.add_row(
                 [label, tp[label].cpu().numpy(), tn[label].cpu().numpy(), fp[label].cpu().numpy(),
                  fn[label].cpu().numpy(), acc.cpu().numpy(), p.cpu().numpy(), r.cpu().numpy(),
@@ -699,286 +598,20 @@ def inference(testset, test_loader_args, model, criterion, args):
     return f2.avg
 
 
-def save_checkpoint(state, is_best, checkpoint='checkpoint', filename=None, filename_best=None):
-    if filename is None:
-        filename = 'checkpoint_epoch' + str(state['epoch'] - 1) + '.pth.tar'
-    # if filename_best is None:
-    #     filename_best = 'model_best_epoch' + str(state['epoch'] - 1) + '.pth.tar'
-    filepath = os.path.join(checkpoint, 'checkpoint.pth.tar')
-    torch.save(state, filepath)
-    shutil.copyfile(filepath, os.path.join(checkpoint, filename))
-    if is_best:
-        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
-        # shutil.copyfile(filepath, os.path.join(checkpoint, filename_best))
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self, name, fmt=':f', type='number'):
-        self.name = name
-        self.fmt = fmt
-        self.reset()
-        self.type = type
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-        if self.name == 'threshold':
-            self.avg = 0.5
-
-    def update(self, val, n=1):
-        # if self.name == 'threshold':
-        #     return
-        if self.count == 0 and self.type == 'list':
-            self.val = np.zeros(val.shape).astype(np.float32)
-            self.avg = np.zeros(val.shape).astype(np.float32)
-            self.sum = np.zeros(val.shape).astype(np.float32)
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = '{name}: {val' + self.fmt + '} ({avg' + self.fmt + '})'
-        return fmtstr.format(**self.__dict__)
-
-
-class ProgressMeter(object):
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters = meters
-        self.prefix = prefix
-
-    def display(self, batch):
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print('\r' + '\t'.join(entries), end='', flush=True)
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches // 1))
-        fmt = '{:' + str(num_digits) + 'd}'
-        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
-
-def adjust_learning_rate(optimizer, epoch, args):
-    # Learning rate has changed before resume, so cannot update it with args.lr
-    if epoch in args.schedule:
-        for param_group in optimizer.param_groups:
-            param_group['lr'] *= args.gamma
-
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        # topk index
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        # 펼쳐서 expand 비교하기 广播
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-        res = []
-        for k in topk:
-            # 有对的就行
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
-
-
-def f2_score(output, target, mask=None):
-    if mask is not None:
-        if len(output.shape) == 2:
-            mask = torch.BoolTensor([mask, ] * output.shape[0])
-        output = output[mask]
-        target = target[mask]
-    tp = 0
-    tn = 0
-    fn = 0
-    fp = 0
-    # TP    predict 和 label 同时为1
-    tp += ((output == 1) & (target.data == 1)).sum().float()
-    # TN    predict 和 label 同时为0
-    tn += ((output == 0) & (target.data == 0)).sum().float()
-    # FN    predict 0 label 1
-    fn += ((output == 0) & (target.data == 1)).sum().float()
-    # FP    predict 1 label 0
-    fp += ((output == 1) & (target.data == 0)).sum().float()
-
-    acc = (tp + tn) / (tp + tn + fn + fp)
-    p = tp / (tp + fp)
-    r = tp / (tp + fn)
-    # F1 = 2 * r * p / (r + p)c
-    lamba_ = 2
-    f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
-    return f2
-
-
-def compute_evaluation_metric(output, target, metrics=None, mask=None):
-    if metrics is None:
-        metrics = {'a'}
-    if mask is not None:
-        if len(output.shape) == 2:
-            mask = torch.BoolTensor([mask, ] * output.shape[0])
-        output = output[mask]
-        target = target[mask]
-    tp = 0
-    tn = 0
-    fn = 0
-    fp = 0
-    # TP    predict 和 label 同时为1
-    tp += ((output == 1) & (target.data == 1)).sum().float()
-    # TN    predict 和 label 同时为0
-    tn += ((output == 0) & (target.data == 0)).sum().float()
-    # FN    predict 0 label 1
-    fn += ((output == 0) & (target.data == 1)).sum().float()
-    # FP    predict 1 label 0
-    fp += ((output == 1) & (target.data == 0)).sum().float()
-
-    acc = None
-    p = None
-    r = None
-    f2 = None
-    if 'a' in metrics:
-        acc = (tp + tn) / (tp + tn + fn + fp)
-    if 'p' in metrics or 'f2' in metrics:
-        # if tp == 0:
-        #     p = 0
-        # else:
-        p = tp / (tp + fp)
-    if 'r' in metrics or 'f2' in metrics:
-        # if tp == 0:
-        #     r = 0
-        # else:
-        r = tp / (tp + fn)
-    # F1 = 2 * r * p / (r + p)
-
-    if 'f2' in metrics:
-        lamba_ = 2
-        f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
-    return tp, tn, fn, fp, acc, p, r, f2
-
-
-def compute_evaluation_metric2(tp, tn, fn, fp, metrics=None):
-    if metrics is None:
-        metrics = {'a'}
-    acc = None
-    p = None
-    r = None
-    f2 = None
-    if 'a' in metrics:
-        acc = (tp + tn) / (tp + tn + fn + fp)
-    if 'p' in metrics or 'f2' in metrics:
-        # if tp == 0:
-        #     p = 0
-        # else:
-        p = tp / (tp + fp)
-    if 'r' in metrics or 'f2' in metrics:
-        # if tp == 0:
-        #     r = 0
-        # else:
-        r = tp / (tp + fn)
-    # F1 = 2 * r * p / (r + p)
-
-    if 'f2' in metrics:
-        lamba_ = 2
-        f2 = (1 + lamba_ ** 2) * (p * r / (lamba_ ** 2 * p + r))
-    return acc, p, r, f2
-
-
-def fbeta(true_label, prediction):
-    return fbeta_score(true_label, prediction, beta=2, average='samples')
-
-
-def get_optimal_threshold(true_label, prediction, iterations=100, metric=fbeta):
-    best_threshold = [0.2] * args.num_classes
-    for t in range(args.num_classes):
-        best_metric = 0
-        temp_threshold = [0.2] * args.num_classes
-        for i in range(iterations):
-            temp_value = i / float(iterations)
-            temp_threshold[t] = temp_value
-            temp_metric = metric(true_label, prediction > temp_threshold)
-            if temp_metric > best_metric:
-                best_metric = temp_metric
-                best_threshold[t] = temp_value
-    return best_threshold
-
-
-class _LoggerFileWrapper(TextIOBase):
-    """
-    sys.stdout = _LoggerFileWrapper(logger_file_path)
-    Log with PRINT Imported from NNI
-    """
-
-    def __init__(self, logger_file_path):
-        self.terminal = sys.stdout
-        logger_file = open(logger_file_path, 'a')
-        self.file = logger_file
-
-    def write(self, s):
-        self.terminal.write(s)
-        if s != '\n':
-            _time_format = '%m/%d/%Y, %I:%M:%S %p'
-            cur_time = datetime.now().strftime(_time_format)
-            self.file.write('[{}] PRINT '.format(cur_time) + s + '\n')
-            self.file.flush()
-        return len(s)
-
-
-class CAMGenerator:
-    def __init__(self, finalconv_name, model):
-        self.finalconv_name = finalconv_name
-        self.model = model
-        # switch to evaluate mode
-        self.model.eval()
-
-        # hook the feature extractor
-        self.features_blobs = []
-        me = self
-
-        def hook_feature(module, input, output):
-            me.features_blobs.append(output.data.cpu().numpy())
-
-        self.model._modules.get(finalconv_name).register_forward_hook(hook_feature)
-
-        # get the softmax weight
-        params = list(self.model.parameters())
-        self.weight_softmax = np.squeeze(params[-2].cpu().data.numpy())
-
-    def generate(self, feature_conv_index, class_idx):
-        feature_conv = self.features_blobs[feature_conv_index]
-        # generate the class activation maps upsample to 256x256
-        size_upsample = (256, 256)
-        bz, nc, h, w = feature_conv.shape
-        output_cam = []
-        for idx in class_idx:
-            cam = self.weight_softmax[idx].dot(feature_conv.reshape((nc, h * w)))
-            cam = cam.reshape(h, w)
-            cam = cam - np.min(cam)
-            cam_img = cam / np.max(cam)
-            cam_img = np.uint8(255 * cam_img)
-            output_cam.append(cv2.resize(cam_img, size_upsample))
-        return output_cam
-
-
 if __name__ == '__main__':
-    main()
-    # test the function of accuracy
-    # output = torch.tensor([[1, 2, 3],
-    #                        [6, 5, 4]])
-    # target = torch.tensor([[1],
-    #                        [0]]).squeeze()
-    # accuracy(output, target, (1, 2))
-    # threshold = AverageMeter('threshold', ':6.f', 'list')
-    # for i in range(10):
-    # x = np.array([1, 2, 3, 4, 5, 6])
-    # threshold.update(x)
-    # x = np.array([2, 2, 3, 4, 5, 6])
-    # threshold.update(x)
-    # x = np.array([3, 2, 1, 4, 5, 6])
-    # threshold.update(x)
-    # print(threshold.avg)
+    args = parser.parse_args()
+    best_acc1 = 0
+
+    logger = logging.getLogger(parser.description)
+    uuid = shortuuid.uuid()
+    pretrain_str = '_pretrain' if args.pretrain else ''
+    checkpoint_name = args.arch + '_' + str(args.dataset) + pretrain_str + '_' + uuid
+    checkpoint = os.path.join(args.checkpoint, checkpoint_name)
+    if args.resume and args.resume_path:
+        roots = args.resume_path.split(os.sep)
+        uuid = (roots[-2]).split('_')[-1]
+        checkpoint_name = roots[-2]
+        checkpoint = os.sep.join(roots[:-1])
+    writer = SummaryWriter(os.path.join(args.tensorboard_path, checkpoint_name))
+
+    main(logger, args)
