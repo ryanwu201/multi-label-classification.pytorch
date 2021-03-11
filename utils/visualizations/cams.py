@@ -22,10 +22,12 @@ class CAMGenerator:
         params = list(self.model.parameters())
         self.weight_softmax = np.squeeze(params[-2].cpu().data.numpy())
 
-    def generate(self, feature_conv_index, class_idx):
+    def generate(self, feature_conv_index, class_idx, width=None, height=None):
         feature_conv = self.features_blobs[feature_conv_index]
         # generate the class activation maps upsample to 256x256
         size_upsample = (256, 256)
+        if width and height:
+            size_upsample = (width, height)
         bz, nc, h, w = feature_conv.shape
         output_cam = []
         for idx in class_idx:
@@ -34,5 +36,7 @@ class CAMGenerator:
             cam = cam - np.min(cam)
             cam_img = cam / np.max(cam)
             cam_img = np.uint8(255 * cam_img)
-            output_cam.append(cv2.resize(cam_img, size_upsample))
+            cam_img = cv2.resize(cam_img, size_upsample)
+            cam_img = cv2.applyColorMap(cam_img, cv2.COLORMAP_JET)
+            output_cam.append(cam_img)
         return output_cam

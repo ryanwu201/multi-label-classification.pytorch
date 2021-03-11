@@ -7,7 +7,6 @@ import time
 import warnings
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import shortuuid
 import torch
@@ -27,7 +26,7 @@ import models as models
 import utils.metrics as metrics
 from dataset import prepare_dataset
 from utils import AverageMeter, ProgressMeter, LoggerFileWrapper, save_checkpoint, CAMGenerator, adjust_learning_rate, \
-    get_optimal_threshold, pass_threshold
+    get_optimal_threshold, pass_threshold, get_bbox_from_heatmap, draw_bbox
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -37,7 +36,7 @@ parser = argparse.ArgumentParser(description='PyTorch Classification Training')
 parser.add_argument('-data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-dataset', type=str, default='strawberry_03_05', help='dataset')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='se_resnet18',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='se_resnet152',
                     choices=model_names,
                     help='model architecture: ' +
                          ' | '.join(model_names) +
@@ -93,7 +92,8 @@ parser.add_argument('-tensorboard-path', '-tensorboard-path', default='../' + sy
 parser.add_argument('-resume', '--resume', dest='resume', action='store_true', default=False,
                     help='loding by latest checkpoint')
 parser.add_argument('--resume-path',
-                    default='../' + sys.path[0].split(os.sep)[-1] + '_result' + os.sep + '' + os.sep + '' + '.pth.tar',
+                    default='../' + sys.path[0].split(os.sep)[
+                        -1] + '_result' + os.sep + 'se_resnet152_strawberry_03_05_pretrain_AF6qk9ZZQ8Aq48atcVfsum' + os.sep + 'model_best' + '.pth.tar',
                     type=str,
                     metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -510,6 +510,17 @@ def inference(testset, test_loader_args, model, criterion, args):
 
             # measure accuracy and record loss
             f2_val = metrics.f2_score(pass_threshold(output, threshold.avg), target)
+
+            # get origin image
+            origin_image = np.array(origin_image)
+
+            width, height = origin_image.shape[1], origin_image.shape[0]
+
+            inference_path = os.path.join(checkpoint, 'inference')
+            if not os.path.isdir(inference_path):
+                '''make dir if not exist'''
+                os.makedirs(inference_path)
+            coords, labels, probabilities = [], [], []
             for label, one_hot in one_hot_map.items():
                 if label not in tp:
                     tp[label], tn[label], fn[label], fp[label] = 0, 0, 0, 0
@@ -531,39 +542,53 @@ def inference(testset, test_loader_args, model, criterion, args):
 
                 # generate class activation mapping
                 class_idx = [np.argmax(one_hot)]
-                CAMs = _CAMGenerator.generate(i, class_idx)
+                CAMs = _CAMGenerator.generate(i, class_idx, width, height)
 
-                # get origin image
-                origin_image = np.array(origin_image)
-                origin_image = cv2.cvtColor(origin_image, cv2.COLOR_BGR2RGB)
-                width, height = origin_image.shape[1], origin_image.shape[0]
-                result = torch.tensor(origin_image)
-
-                for j in range(len(class_idx)):
-                    heatmap = cv2.applyColorMap(cv2.resize(CAMs[j], (width, height)), cv2.COLORMAP_JET)
-                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-                    heatmap_ = cv2.addWeighted(origin_image, 0.3, heatmap, 0.7, 0)
-                    result = torch.cat([result, torch.tensor(heatmap_)], 1)
-
-                # plot class activation map
-                plt.rcParams['font.sans-serif'] = ['Courier New']
-                plt.imshow(result)
-                plt.xticks([])
-                plt.yticks([])
-                plt.xlabel(str(title_table))
-                plt.title(filename.split('.')[0])
-
-                # save class activation map fig
                 type_ = 'unknown'
                 type_ = 'tp' if tp_ > 0 else type_
                 type_ = 'tn' if tn_ > 0 else type_
                 type_ = 'fp' if fp_ > 0 else type_
                 type_ = 'fn' if fn_ > 0 else type_
-                save_path = os.path.join(checkpoint, 'inference' + os.sep + label + os.sep + type_)
+                save_path = os.path.join(inference_path, label + os.sep + type_)
+                cam_save_path = os.path.join(save_path, 'cams')
                 if not os.path.isdir(save_path):
                     '''make dir if not exist'''
                     os.makedirs(save_path)
-                plt.savefig(os.path.join(save_path, filename), bbox_inches='tight')
+                if not os.path.isdir(cam_save_path):
+                    '''make dir if not exist'''
+                    os.makedirs(cam_save_path)
+
+                result = torch.tensor(origin_image)
+                for j in range(len(class_idx)):
+                    heatmap = CAMs[j]
+                    coords_per_label = get_bbox_from_heatmap(heatmap, 110)
+
+                    coords.extend(coords_per_label)
+                    labels.append(label)
+                    probabilities.append(output.cpu().numpy()[0][class_idx[j]])
+
+                    origin_image_with_bbox = draw_bbox(origin_image, coords_per_label, colors=((255, 0, 0),),
+                                                       texts=(
+                                                           '%s: %.3f' % (
+                                                               label, output.cpu().numpy()[0][class_idx[j]]),))
+                    if j == 0:
+                        result = torch.tensor(origin_image_with_bbox)
+                    else:
+                        result = torch.cat([result, torch.tensor(origin_image_with_bbox)], 1)
+                    cv2.imwrite(os.path.join(cam_save_path, filename), heatmap)
+                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+                    heatmap_ = cv2.addWeighted(origin_image, 0.3, heatmap, 0.7, 0)
+                    result = torch.cat([result, torch.tensor(heatmap_)], 1)
+
+                # plot class activation map and save
+                cv2.imwrite(os.path.join(save_path, filename), np.array(result))
+
+            # save image with bbox per image
+            texts = ['%s: %.3f' % (label, probabilities[i]) for i, label in enumerate(labels)]
+            image_with_bbox_per_image = draw_bbox(origin_image, coords,
+                                                  colors=((0, 0, 255), (255, 0, 0), (0, 165, 255)),
+                                                  texts=texts)
+            cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
 
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
@@ -575,8 +600,6 @@ def inference(testset, test_loader_args, model, criterion, args):
             if i % args.print_freq == 0 or i == (lenth - 1):
                 progress.display(i)
 
-            if i == 10:
-                break
         # result per label
         result_table = PrettyTable()
         result_table.field_names = ["label", "tp", 'tn', 'fp', 'fn', 'accuracy', 'precision', 'recall', 'f2']
