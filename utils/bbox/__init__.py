@@ -1,4 +1,5 @@
 import cv2
+import os
 
 
 def draw_bbox(image, coords, colors, texts=None):
@@ -37,3 +38,33 @@ def draw_label(image, coords, colors, texts=None):
         cv2.putText(image, text, (x_min + 2, y_min - 5), cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 255, 255),
                     thickness=1, )
     return image
+
+
+def save_bbox_to_xml(image, coords, filename, labels, path):
+    xml_file = open(os.path.join(path, filename + '.xml'), 'w')
+    xml_file.write('<annotation>\n')
+    xml_file.write('    <folder></folder>\n')
+    xml_file.write('    <filename>' + filename.split('.')[0] + '.jpg</filename>\n')
+    xml_file.write('    <size>\n')
+    xml_file.write('        <width>' + str(image.shape[1]) + '</width>\n')
+    xml_file.write('        <height>' + str(image.shape[0]) + '</height>\n')
+    xml_file.write('        <depth>3</depth>\n')
+    xml_file.write('    </size>\n')
+
+    # write the region of image on xml file
+    for i, label in enumerate(labels):
+        xmin, ymin, xmax, ymax = coords[i]
+        xml_file.write('    <object>\n')
+        xml_file.write('        <name>' + label + '</name>\n')
+        xml_file.write('        <pose>Unspecified</pose>\n')
+        xml_file.write('        <truncated>0</truncated>\n')
+        xml_file.write('        <difficult>0</difficult>\n')
+        xml_file.write('        <bndbox>\n')
+        xml_file.write('            <xmin>' + str(xmin) + '</xmin>\n')
+        xml_file.write('            <ymin>' + str(ymin) + '</ymin>\n')
+        xml_file.write('            <xmax>' + str(xmax) + '</xmax>\n')
+        xml_file.write('            <ymax>' + str(ymax) + '</ymax>\n')
+        xml_file.write('        </bndbox>\n')
+        xml_file.write('    </object>\n')
+    xml_file.write('</annotation>')
+    xml_file.close()

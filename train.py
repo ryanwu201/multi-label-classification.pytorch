@@ -26,7 +26,7 @@ import models as models
 import utils.metrics as metrics
 from dataset import prepare_dataset
 from utils import AverageMeter, ProgressMeter, LoggerFileWrapper, save_checkpoint, CAMGenerator, adjust_learning_rate, \
-    get_optimal_threshold, pass_threshold, get_bbox_from_heatmap, draw_bbox
+    get_optimal_threshold, pass_threshold, get_bbox_from_heatmap, draw_bbox, save_bbox_to_xml
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -594,6 +594,12 @@ def inference(testset, test_loader_args, model, criterion, args):
                                                   texts=texts)
             cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
 
+            # save bbox to xml
+            annotation_save_path = os.path.join(inference_path, 'annotations')
+            if not os.path.isdir(annotation_save_path):
+                '''make dir if not exist'''
+                os.makedirs(annotation_save_path)
+            save_bbox_to_xml(origin_image, coords, filename.split('.')[0], labels, annotation_save_path)
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
 
