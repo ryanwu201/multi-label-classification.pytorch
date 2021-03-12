@@ -551,12 +551,16 @@ def inference(testset, test_loader_args, model, criterion, args):
                 type_ = 'fn' if fn_ > 0 else type_
                 save_path = os.path.join(inference_path, label + os.sep + type_)
                 cam_save_path = os.path.join(save_path, 'cams')
+                bbox_save_path = os.path.join(save_path, 'bbox')
                 if not os.path.isdir(save_path):
                     '''make dir if not exist'''
                     os.makedirs(save_path)
                 if not os.path.isdir(cam_save_path):
                     '''make dir if not exist'''
                     os.makedirs(cam_save_path)
+                if not os.path.isdir(bbox_save_path):
+                    '''make dir if not exist'''
+                    os.makedirs(bbox_save_path)
 
                 result = torch.tensor(origin_image)
                 for j in range(len(class_idx)):
@@ -571,12 +575,12 @@ def inference(testset, test_loader_args, model, criterion, args):
                                                        texts=(
                                                            '%s: %.3f' % (
                                                                label, output.cpu().numpy()[0][class_idx[j]]),))
+                    cv2.imwrite(os.path.join(bbox_save_path, filename), origin_image_with_bbox)
                     if j == 0:
                         result = torch.tensor(origin_image_with_bbox)
                     else:
                         result = torch.cat([result, torch.tensor(origin_image_with_bbox)], 1)
                     cv2.imwrite(os.path.join(cam_save_path, filename), heatmap)
-                    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
                     heatmap_ = cv2.addWeighted(origin_image, 0.3, heatmap, 0.7, 0)
                     result = torch.cat([result, torch.tensor(heatmap_)], 1)
 
