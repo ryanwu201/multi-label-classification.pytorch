@@ -1,5 +1,7 @@
 import torch
-from sklearn.metrics import fbeta_score
+from prettytable import PrettyTable
+import numpy as np
+from sklearn.metrics import fbeta_score, confusion_matrix, multilabel_confusion_matrix
 
 
 def accuracy(output, target, topk=(1,)):
@@ -127,3 +129,53 @@ def compute_evaluation_metric2(tp, tn, fn, fp, metrics=None):
 
 def fbeta(true_label, prediction):
     return fbeta_score(true_label, prediction, beta=2, average='samples')
+
+
+def multi_label_confusion_matrix(y_true, y_pred, labels=None):
+    matrix = multilabel_confusion_matrix(y_true, y_pred)
+    if not labels:
+        return matrix
+    return show_multi_label_confusion_matrix(matrix, labels)
+
+
+def multi_label_score_confusion_matrix(y_true, y_pred, num_labels, labels=None):
+    scores_true, scores_pred = multi_label_score(y_true), multi_label_score(y_pred)
+    matrix = confusion_matrix(scores_true, scores_pred, labels=range(num_labels))
+    if not labels:
+        return matrix
+    return show_confusion_matrix(matrix, labels)
+
+
+def show_multi_label_confusion_matrix(matrix, labels):
+    result = ''
+    for i, label in enumerate(labels):
+        table = PrettyTable(['', 'not ' + label, label])
+        table.add_row(['not ' + label, *[str(value) for value in matrix[i][0]]])
+        table.add_row([label, *[str(value) for value in matrix[i][1]]])
+        result += '\n' + str(table)
+    return result
+
+
+def show_confusion_matrix(matrix, labels):
+    table = PrettyTable()
+    table.add_column('', [labels[i] for i in range(len(labels))])
+    for i in range(len(labels)):
+        label = labels[i]
+        columns = matrix[:, i]
+        table.add_column(label, columns)
+    return str(table)
+
+
+def multi_label_score(y):
+    scores = None
+    for y_true_one in y:
+        indexes = np.argwhere(y_true_one)
+        indexes_sum = indexes.sum()
+        if indexes.shape[0] > 1:
+            indexes_sum += indexes.shape[0]
+        score = np.expand_dims(indexes_sum, 0)
+        if scores is not None:
+            scores = np.concatenate((scores, score), axis=0)
+        else:
+            scores = score
+    return scores

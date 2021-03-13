@@ -19,6 +19,7 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 from prettytable import PrettyTable
+from sklearn.metrics import multilabel_confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
 from torchsummary import summary
 
@@ -26,7 +27,8 @@ import models as models
 import utils.metrics as metrics
 from dataset import prepare_dataset
 from utils import AverageMeter, ProgressMeter, LoggerFileWrapper, save_checkpoint, CAMGenerator, adjust_learning_rate, \
-    get_optimal_threshold, pass_threshold, get_bbox_from_heatmap, draw_bbox, save_bbox_to_xml
+    get_optimal_threshold, pass_threshold, get_bbox_from_heatmap, draw_bbox, save_bbox_to_xml, \
+    show_confusion_matrix, show_multi_label_confusion_matrix, multi_label_score_confusion_matrix
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -490,6 +492,10 @@ def inference(testset, test_loader_args, model, criterion, args):
     _CAMGenerator = CAMGenerator('layer4', model)
 
     one_hot_map = testset.get_one_hot_map()
+    set_labels = testset.get_labels()
+    connect_labels = testset.get_connect_labels()
+    confusion_matrix = np.zeros((len(set_labels), 2, 2), np.int32)
+    score_confusion_matrix = np.zeros((len(connect_labels), len(connect_labels)), np.int32)
     lenth = len(test_loader)
     with torch.no_grad():
         end = time.time()
@@ -510,6 +516,14 @@ def inference(testset, test_loader_args, model, criterion, args):
 
             # measure accuracy and record loss
             f2_val = metrics.f2_score(pass_threshold(output, threshold.avg), target)
+
+            # confusion_matrix
+            confusion_matrix += multilabel_confusion_matrix(pass_threshold(output, threshold.avg).cpu().int(),
+                                                            target.cpu().int())
+
+            score_confusion_matrix += multi_label_score_confusion_matrix(
+                pass_threshold(output, threshold.avg).cpu().int().numpy(),
+                target.cpu().int().numpy(), len(connect_labels))
 
             # get origin image
             origin_image = np.array(origin_image)
@@ -587,19 +601,20 @@ def inference(testset, test_loader_args, model, criterion, args):
                 # plot class activation map and save
                 cv2.imwrite(os.path.join(save_path, filename), np.array(result))
 
-            # save image with bbox per image
-            texts = ['%s: %.3f' % (label, probabilities[i]) for i, label in enumerate(labels)]
-            image_with_bbox_per_image = draw_bbox(origin_image, coords,
-                                                  colors=((0, 0, 255), (255, 0, 0), (0, 165, 255)),
-                                                  texts=texts)
-            cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
+            if args.visualize:
+                # save image with bbox per image
+                texts = ['%s: %.3f' % (label, probabilities[i]) for i, label in enumerate(labels)]
+                image_with_bbox_per_image = draw_bbox(origin_image, coords,
+                                                      colors=((0, 0, 255), (255, 0, 0), (0, 165, 255)),
+                                                      texts=texts)
+                cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
 
-            # save bbox to xml
-            annotation_save_path = os.path.join(inference_path, 'annotations')
-            if not os.path.isdir(annotation_save_path):
-                '''make dir if not exist'''
-                os.makedirs(annotation_save_path)
-            save_bbox_to_xml(origin_image, coords, filename.split('.')[0], labels, annotation_save_path)
+                # save bbox to xml
+                annotation_save_path = os.path.join(inference_path, 'annotations')
+                if not os.path.isdir(annotation_save_path):
+                    '''make dir if not exist'''
+                    os.makedirs(annotation_save_path)
+                save_bbox_to_xml(origin_image, coords, filename.split('.')[0], labels, annotation_save_path)
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
 
@@ -628,6 +643,12 @@ def inference(testset, test_loader_args, model, criterion, args):
         mean = (f2s['flower'] + f2s['fruit'] + f2s['leaf']) / args.num_classes
         f2_table.add_row(['f2', f2s['flower'], f2s['fruit'], f2s['leaf'], mean])
         print('\n' + str(f2_table))
+
+        str_confusion_matrix = show_multi_label_confusion_matrix(confusion_matrix, set_labels)
+        str_score_confusion_matrix = show_confusion_matrix(score_confusion_matrix, connect_labels)
+        print('\n' + str_confusion_matrix)
+        print('\n' + str_score_confusion_matrix)
+
     return f2.avg
 
 

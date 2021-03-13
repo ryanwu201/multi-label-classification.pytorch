@@ -140,15 +140,27 @@ class MultiLabelDataset(Dataset):
             filenames = set(filenames.split('\n'))
         return filenames
 
+    def get_labels(self):
+        if self.label_type == 'voc':
+            categories = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
+                          'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
+                          'dog', 'horse', 'motorbike', 'pottedplant',
+                          'sheep', 'sofa', 'train', 'tvmonitor', 'person']
+        else:
+            categories = ['flower', 'fruit', 'leaf']
+        return categories
+
+    def get_connect_labels(self):
+        if self.label_type == 'voc':
+            return None
+        else:
+            categories = ['flower', 'fruit', 'leaf', 'flower_fruit', 'flower_leaf', 'fruit_leaf',
+                          'flower_fruit_leaf']
+        return categories
+
     def get_one_hot_map(self):
         if len(self.one_hot_map) == 0:
-            if self.label_type == 'voc':
-                categories = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
-                              'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
-                              'dog', 'horse', 'motorbike', 'pottedplant',
-                              'sheep', 'sofa', 'train', 'tvmonitor', 'person']
-            else:
-                categories = ['flower', 'fruit', 'leaf']
+            categories = self.get_labels()
             one_hot = np.eye(len(categories))
             for index, cls_name in enumerate(sorted(categories)):
                 # 每一个类对应一个one hot 编码
