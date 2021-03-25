@@ -1,46 +1,47 @@
 import cv2
 import os
+import copy
 
 
-def draw_bbox(image, coords, colors, texts=None):
+def draw_bbox(image, bboxes):
     image = image.copy()
-    label_coords = []
-    for i, (x_min, y_min, x_max, y_max) in enumerate(coords):
-        color = colors[i] if i < len(colors) else colors[0]
-        cv2.rectangle(image, (x_min, y_min), (x_max, y_max), color, 2)
-        if texts:
-            if y_min < 14:
-                y_min = 14
-            # if overlap
-            if i != 0:
-                for _, label_y in label_coords:
-                    if y_min >= label_y - 14 and y_min <= label_y:
-                        y_min = label_y + 14
-                    elif y_min >= label_y and y_min <= label_y + 14:
-                        y_min = label_y + 14
-                    else:
-                        break
-
-            label_coords.append((x_min, y_min))
-    draw_label(image, label_coords, colors, texts)
+    for i, bbox in enumerate(bboxes):
+        cv2.rectangle(image, (bbox.x_min, bbox.y_min), (bbox.x_max, bbox.y_max), bbox.color, 2)
+    draw_label(image, init_label_coords(bboxes))
     return image
 
 
-def draw_label(image, coords, colors, texts=None):
-    if not texts:
-        return image
-    if len(coords) != len(texts):
-        return image
-    for i, (x_min, y_min) in enumerate(coords):
-        text = texts[i]
-        color = colors[i] if i < len(colors) else colors[0]
-        cv2.rectangle(image, (x_min, y_min - 14), (x_min + len(text) * 7, y_min), color, -1)
-        cv2.putText(image, text, (x_min + 2, y_min - 5), cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 255, 255),
+def init_label_coords(bboxes):
+    labels = []
+    for i, bbox in enumerate(bboxes):
+        label = copy.deepcopy(bbox)
+        label.x_max, label.y_max = 0, 0
+        if label.y_min < 14:
+            label.y_min = 14
+        # if overlap
+        if i != 0:
+            for label_save in labels:
+                if label.y_min >= label_save.y_min - 14 and label.y_min <= label_save.y_min:
+                    label.y_min = label_save.y_min + 14
+                elif label.y_min >= label_save.y_min and label.y_min <= label_save.y_min + 14:
+                    label.y_min = label_save.y_min + 14
+                else:
+                    break
+        labels.append(label)
+    return labels
+
+
+def draw_label(image, labels):
+    for label in labels:
+        cv2.rectangle(image, (label.x_min, label.y_min - 14), (label.x_min + len(label.text) * 7, label.y_min),
+                      label.color, -1)
+        cv2.putText(image, label.text, (label.x_min + 2, label.y_min - 5), cv2.FONT_HERSHEY_COMPLEX, 0.4,
+                    (255, 255, 255),
                     thickness=1, )
     return image
 
 
-def save_bbox_to_xml(image, coords, filename, labels, path):
+def save_bbox_to_xml(image, bboxes, filename, path):
     xml_file = open(os.path.join(path, filename + '.xml'), 'w')
     xml_file.write('<annotation>\n')
     xml_file.write('    <folder></folder>\n')
@@ -52,18 +53,17 @@ def save_bbox_to_xml(image, coords, filename, labels, path):
     xml_file.write('    </size>\n')
 
     # write the region of image on xml file
-    for i, label in enumerate(labels):
-        xmin, ymin, xmax, ymax = coords[i]
+    for i, bbox in enumerate(bboxes):
         xml_file.write('    <object>\n')
-        xml_file.write('        <name>' + label + '</name>\n')
+        xml_file.write('        <name>' + bbox.label + '</name>\n')
         xml_file.write('        <pose>Unspecified</pose>\n')
         xml_file.write('        <truncated>0</truncated>\n')
         xml_file.write('        <difficult>0</difficult>\n')
         xml_file.write('        <bndbox>\n')
-        xml_file.write('            <xmin>' + str(xmin) + '</xmin>\n')
-        xml_file.write('            <ymin>' + str(ymin) + '</ymin>\n')
-        xml_file.write('            <xmax>' + str(xmax) + '</xmax>\n')
-        xml_file.write('            <ymax>' + str(ymax) + '</ymax>\n')
+        xml_file.write('            <xmin>' + str(bbox.x_min) + '</xmin>\n')
+        xml_file.write('            <ymin>' + str(bbox.y_min) + '</ymin>\n')
+        xml_file.write('            <xmax>' + str(bbox.x_max) + '</xmax>\n')
+        xml_file.write('            <ymax>' + str(bbox.y_max) + '</ymax>\n')
         xml_file.write('        </bndbox>\n')
         xml_file.write('    </object>\n')
     xml_file.write('</annotation>')

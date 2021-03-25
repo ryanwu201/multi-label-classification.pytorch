@@ -534,7 +534,7 @@ def inference(testset, test_loader_args, model, criterion, args):
             if not os.path.isdir(inference_path):
                 '''make dir if not exist'''
                 os.makedirs(inference_path)
-            coords, labels, probabilities = [], [], []
+            bboxes = []
             for label, one_hot in one_hot_map.items():
                 if label not in tp:
                     tp[label], tn[label], fn[label], fp[label] = 0, 0, 0, 0
@@ -579,16 +579,13 @@ def inference(testset, test_loader_args, model, criterion, args):
                 result = torch.tensor(origin_image)
                 for j in range(len(class_idx)):
                     heatmap = CAMs[j]
-                    coords_per_label = get_bbox_from_heatmap(heatmap, 110)
+                    colors = (255, 0, 0), (0, 165, 255), (0, 0, 255)
+                    bboxes_per_label = get_bbox_from_heatmap(heatmap, 110, merge=label == 'leaf', label_name=label,
+                                                             probability=output.cpu().numpy()[0][class_idx[j]],
+                                                             color=colors[class_idx[j]])
+                    bboxes.extend(bboxes_per_label)
 
-                    coords.extend(coords_per_label)
-                    labels.append(label)
-                    probabilities.append(output.cpu().numpy()[0][class_idx[j]])
-
-                    origin_image_with_bbox = draw_bbox(origin_image, coords_per_label, colors=((255, 0, 0),),
-                                                       texts=(
-                                                           '%s: %.3f' % (
-                                                               label, output.cpu().numpy()[0][class_idx[j]]),))
+                    origin_image_with_bbox = draw_bbox(origin_image, bboxes_per_label)
                     cv2.imwrite(os.path.join(bbox_save_path, filename), origin_image_with_bbox)
                     if j == 0:
                         result = torch.tensor(origin_image_with_bbox)
@@ -603,10 +600,7 @@ def inference(testset, test_loader_args, model, criterion, args):
 
             if args.visualize:
                 # save image with bbox per image
-                texts = ['%s: %.3f' % (label, probabilities[i]) for i, label in enumerate(labels)]
-                image_with_bbox_per_image = draw_bbox(origin_image, coords,
-                                                      colors=((0, 0, 255), (255, 0, 0), (0, 165, 255)),
-                                                      texts=texts)
+                image_with_bbox_per_image = draw_bbox(origin_image, bboxes)
                 cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
 
                 # save bbox to xml
@@ -614,7 +608,7 @@ def inference(testset, test_loader_args, model, criterion, args):
                 if not os.path.isdir(annotation_save_path):
                     '''make dir if not exist'''
                     os.makedirs(annotation_save_path)
-                save_bbox_to_xml(origin_image, coords, filename.split('.')[0], labels, annotation_save_path)
+                save_bbox_to_xml(origin_image, bboxes, filename.split('.')[0], annotation_save_path)
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
 
