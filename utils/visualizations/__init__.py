@@ -60,4 +60,6 @@ class CanvasObject:
 
     @property
     def text(self):
+        if self.probability < 0:
+            return self.label
         return '%s: %.3f' % (self.label, self.probability)
