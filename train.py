@@ -133,9 +133,7 @@ checkpoint = None
 def main(logger, args):
     torch.set_default_tensor_type(torch.FloatTensor)
     torch.cuda.empty_cache()
-    if not os.path.isdir(checkpoint):
-        '''make dir if not exist'''
-        os.makedirs(checkpoint)
+    os.makedirs(checkpoint, exist_ok=True)
     # log
     logger.setLevel(level=logging.DEBUG)
     log_file_name = "log.txt"
@@ -326,13 +324,13 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                         'num_workers': args.workers,
                         'pin_memory': True}
     test_loader = torch.utils.data.DataLoader(**test_loader_args)
-    if args.inference:
-        inference(testset, test_loader_args, model, criterion, args)
+    if args.evaluate:
+        evaluate(testset, test_loader_args, model, criterion, args)
         return
     threshold = AverageMeter('threshold', '', 'list')
     threshold.update(np.array([0.5] * args.num_classes))
-    if args.evaluate:
-        validate(val_loader, model, criterion, args, threshold)
+    if args.inference:
+        inference(testset, test_loader_args, model, criterion, args)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -474,6 +472,78 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
 def inference(testset, test_loader_args, model, criterion, args):
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
+    from dataset import MultiLabelDataset
+    testset = MultiLabelDataset(
+        label_root_path=False,
+        label_type=testset.label_type,
+        # img_root_path=r'D:\Datasets\new_strawberry\04.05\strawberry_data\1\test_04_06\JPEGImages',
+        # img_root_path=r'D:\Datasets\new_strawberry\04.05\strawberry_data\2\train_04_06\JPEGImages',
+        img_root_path=r'D:\Datasets\new_strawberry\04.05\test\resized\JPEGImages',
+        transform=testset.transform)
+    testset.requires_filename = True
+    testset.requires_origin = True
+    test_loader_args['dataset'] = testset
+    test_loader = torch.utils.data.DataLoader(**test_loader_args)
+
+    batch_time = AverageMeter('Time', ':6.3f')
+    progress = ProgressMeter(
+        len(testset),
+        [batch_time],
+        prefix='inference: ')
+
+    one_hot_map = testset.get_one_hot_map(exchange=True)
+    _CAMGenerator = CAMGenerator('layer4', model)
+    lenth = len(test_loader)
+    with torch.no_grad():
+        end = time.time()
+        for i, (image, filename, origin_image) in enumerate(testset):
+            if args.gpu is not None:
+                image = image.cuda(args.gpu, non_blocking=True)
+            # compute output
+            if len(image.shape) < 4:
+                image = image.unsqueeze(0)
+            output = model(image)
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            # get origin image
+            origin_image = np.array(origin_image)
+            width, height = origin_image.shape[1], origin_image.shape[0]
+
+            bboxes = []
+            # generate class activation mapping
+            class_idx = range(len(testset.get_labels()))
+            CAMs = _CAMGenerator.generate(i, class_idx, width, height)
+            for j in range(len(class_idx)):
+                probability = output[0][class_idx[j]]
+                if probability < 0.5: continue
+                heatmap = CAMs[j]
+                label = one_hot_map[class_idx[j]]
+                colors = (255, 0, 0), (0, 165, 255), (0, 0, 255)
+                bboxes_per_label = get_bbox_from_heatmap(heatmap, 110, label_name=label,
+                                                         probability=output.cpu().numpy()[0][class_idx[j]],
+                                                         color=colors[class_idx[j]])
+                bboxes.extend(bboxes_per_label)
+
+            inference_path = os.path.join(checkpoint, 'inference')
+            os.makedirs(inference_path, exist_ok=True)
+            if args.visualize:
+                # save image with bbox per image
+                image_with_bbox_per_image = draw_bbox(origin_image, bboxes)
+                cv2.imwrite(os.path.join(inference_path, filename), image_with_bbox_per_image)
+            # save bbox to xml
+            annotation_save_path = os.path.join(inference_path, 'annotations')
+            os.makedirs(annotation_save_path, exist_ok=True)
+            save_bbox_to_xml(origin_image, bboxes, filename.split('.')[0], annotation_save_path)
+            if i % args.print_freq == 0 or i == (lenth - 1):
+                progress.display(i)
+
+
+def evaluate(testset, test_loader_args, model, criterion, args):
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
 
     testset.requires_filename = True
     testset.requires_origin = True
@@ -488,7 +558,7 @@ def inference(testset, test_loader_args, model, criterion, args):
     progress = ProgressMeter(
         len(testset),
         [batch_time, losses, f2, threshold],
-        prefix='inference: ')
+        prefix='evaluation: ')
     _CAMGenerator = CAMGenerator('layer4', model)
 
     one_hot_map = testset.get_one_hot_map()
@@ -530,10 +600,8 @@ def inference(testset, test_loader_args, model, criterion, args):
 
             width, height = origin_image.shape[1], origin_image.shape[0]
 
-            inference_path = os.path.join(checkpoint, 'inference')
-            if not os.path.isdir(inference_path):
-                '''make dir if not exist'''
-                os.makedirs(inference_path)
+            inference_path = os.path.join(checkpoint, 'evaluation')
+            os.makedirs(inference_path, exist_ok=True)
             bboxes = []
             for label, one_hot in one_hot_map.items():
                 if label not in tp:
@@ -566,15 +634,9 @@ def inference(testset, test_loader_args, model, criterion, args):
                 save_path = os.path.join(inference_path, label + os.sep + type_)
                 cam_save_path = os.path.join(save_path, 'cams')
                 bbox_save_path = os.path.join(save_path, 'bbox')
-                if not os.path.isdir(save_path):
-                    '''make dir if not exist'''
-                    os.makedirs(save_path)
-                if not os.path.isdir(cam_save_path):
-                    '''make dir if not exist'''
-                    os.makedirs(cam_save_path)
-                if not os.path.isdir(bbox_save_path):
-                    '''make dir if not exist'''
-                    os.makedirs(bbox_save_path)
+                os.makedirs(save_path, exist_ok=True)
+                os.makedirs(cam_save_path, exist_ok=True)
+                os.makedirs(bbox_save_path, exist_ok=True)
 
                 result = torch.tensor(origin_image)
                 for j in range(len(class_idx)):
@@ -605,9 +667,7 @@ def inference(testset, test_loader_args, model, criterion, args):
 
                 # save bbox to xml
                 annotation_save_path = os.path.join(inference_path, 'annotations')
-                if not os.path.isdir(annotation_save_path):
-                    '''make dir if not exist'''
-                    os.makedirs(annotation_save_path)
+                os.makedirs(annotation_save_path, exist_ok=True)
                 save_bbox_to_xml(origin_image, bboxes, filename.split('.')[0], annotation_save_path)
             losses.update(loss.item(), image.size(0))
             f2.update(f2_val, image.size(0))
