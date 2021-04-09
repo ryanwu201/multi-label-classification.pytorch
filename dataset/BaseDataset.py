@@ -50,16 +50,17 @@ class MultiLabelDataset(Dataset):
         self.label_file_suffix = label_file_suffix
         self.train_type = train_type
         self.label_type = label_type
-        self.label_file_suffix = label_file_suffix
-        if (self.label_type != 'native') and self.label_file_suffix == '.txt':
-            self.label_file_suffix = '.xml'
-        if (self.label_type == 'csv') and self.label_file_suffix == '.txt':
-            self.label_file_suffix = '.csv'
-        self.one_hot_map = dict()
+        self.label_root_path = label_root_path
         imageset_filenames = None
-        if self.label_type == 'voc':
-            imageset_filenames = self._get_imageset_filenames(imageset_root_path)
-        self.data = self._read_file(label_root_path, imageset_filenames)
+        self.one_hot_map = dict()
+        if self.label_root_path:
+            if (self.label_type != 'naive') and self.label_file_suffix == '.txt':
+                self.label_file_suffix = '.xml'
+            if (self.label_type == 'csv') and self.label_file_suffix == '.txt':
+                self.label_file_suffix = '.csv'
+            if self.label_type == 'voc':
+                imageset_filenames = self._get_imageset_filenames(imageset_root_path)
+        self.data = self._read_file(img_root_path, imageset_filenames)
         self.img_root_path = img_root_path
         self.transform = transform
         self.requires_filename = requires_filename
@@ -84,7 +85,9 @@ class MultiLabelDataset(Dataset):
         plt.imshow(img)
         plt.show()
         """
-        result = img, torch.from_numpy(multi_labels_embeding).float()
+        result = img,
+        if self.label_root_path:
+            result = *result, torch.from_numpy(multi_labels_embeding).float()
         if self.requires_filename:
             result = *result, filename + self.suffix
         if self.requires_origin:
@@ -95,7 +98,7 @@ class MultiLabelDataset(Dataset):
         self.get_one_hot_map()
         data = []
         if self.label_type == 'csv':
-            labels_df = pd.read_csv(path)
+            labels_df = pd.read_csv(self.label_root_path)
             length = len(labels_df['image_name'])
             for index in range(length):
                 filename = labels_df['image_name'][index]
@@ -112,15 +115,18 @@ class MultiLabelDataset(Dataset):
             for filename in imageset_filenames:
                 if filename == '': continue
                 if filename == 'voc': continue
-                if filename.count('.') <= 0:
+                if filename.count('.') > 0: filename = filename.split('.')[0]
+                if self.label_root_path:
                     filename += self.label_file_suffix
-                labels = self._read_multi_label_file(os.path.join(path, filename))
+                    labels = self._read_multi_label_file(os.path.join(self.label_root_path, filename))
 
-                multi_labels_embeding = np.zeros(len(self.one_hot_map))
-                for label in labels:
-                    if label != '':
-                        multi_labels_embeding += self.one_hot_map[label]
-                data.append((filename.split('.')[0], multi_labels_embeding))
+                    multi_labels_embeding = np.zeros(len(self.one_hot_map))
+                    for label in labels:
+                        if label != '':
+                            multi_labels_embeding += self.one_hot_map[label]
+                    data.append((filename.split('.')[0], multi_labels_embeding))
+                else:
+                    data.append((filename.split('.')[0], None))
         return data
 
     def _read_multi_label_file(self, path):
@@ -158,7 +164,7 @@ class MultiLabelDataset(Dataset):
                           'flower_fruit_leaf']
         return categories
 
-    def get_one_hot_map(self):
+    def get_one_hot_map(self, exchange=False):
         if len(self.one_hot_map) == 0:
             categories = self.get_labels()
             one_hot = np.eye(len(categories))
@@ -166,6 +172,8 @@ class MultiLabelDataset(Dataset):
                 # 每一个类对应一个one hot 编码
                 oh = one_hot[index, :]
                 self.one_hot_map[cls_name] = oh
+        if exchange:
+            return {np.argmax(value): key for key, value in self.one_hot_map.items()}
 
         return self.one_hot_map
 
