@@ -66,7 +66,7 @@ parser.add_argument('-t-b', '--test-batch-size', default=128, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--num-classes', default=3, type=int, metavar='N',
+parser.add_argument('--num-classes', default=-1, type=int, metavar='N',
                     help='number of classes')
 parser.add_argument('-pretrain', '--pretrain', dest='pretrain', action='store_true', default=True,
                     help='pretrain')
@@ -204,6 +204,24 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
+    # Data loading code
+    print('==> Preparing dataset')
+    trainset, valset, testset = prepare_dataset(args.dataset, args.pretrain, args.on_linux)
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
+    else:
+        train_sampler = None
+
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+                                               num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.test_batch_size, shuffle=False,
+                                             num_workers=args.workers, pin_memory=True)
+    test_loader_args = {'dataset': testset, 'batch_size': args.test_batch_size, 'shuffle': False,
+                        'num_workers': args.workers,
+                        'pin_memory': True}
+    test_loader = torch.utils.data.DataLoader(**test_loader_args)
+    if args.num_classes == -1:
+        args.num_classes = trainset.num_classes
     # create model
     print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('resnext'):
@@ -308,22 +326,6 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
 
     cudnn.benchmark = True
 
-    # Data loading code
-    print('==> Preparing dataset')
-    trainset, valset, testset = prepare_dataset(args.dataset, args.pretrain, args.on_linux)
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
-    else:
-        train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-                                               num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.test_batch_size, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True)
-    test_loader_args = {'dataset': testset, 'batch_size': args.test_batch_size, 'shuffle': False,
-                        'num_workers': args.workers,
-                        'pin_memory': True}
-    test_loader = torch.utils.data.DataLoader(**test_loader_args)
     if args.evaluate:
         evaluate(testset, test_loader_args, model, criterion, args)
         return

@@ -38,7 +38,7 @@ class MultiLabelDataset(Dataset):
     def __init__(self, label_root_path, img_root_path, imageset_root_path=None, label_file_suffix='.txt',
                  train_type='trainval',
                  label_type='naive',
-                 transform=None, requires_filename=False, requires_origin=False):
+                 transform=None, requires_filename=False, requires_origin=False, labels=None):
         """
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -51,6 +51,8 @@ class MultiLabelDataset(Dataset):
         self.train_type = train_type
         self.label_type = label_type
         self.label_root_path = label_root_path
+        self.labels = labels
+        self.labels = self.get_labels()
         imageset_filenames = None
         self.one_hot_map = dict()
         if self.label_root_path:
@@ -147,16 +149,21 @@ class MultiLabelDataset(Dataset):
         return filenames
 
     def get_labels(self):
-        if self.label_type == 'voc':
+        if self.labels:
+            categories = self.labels
+        elif self.label_type == 'voc':
             categories = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle',
                           'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
                           'dog', 'horse', 'motorbike', 'pottedplant',
                           'sheep', 'sofa', 'train', 'tvmonitor', 'person']
         else:
             categories = ['flower', 'fruit', 'leaf']
+        self.num_classes = len(categories)
         return categories
 
     def get_connect_labels(self):
+        if self.labels:
+            return self.labels
         if self.label_type == 'voc':
             return None
         else:
