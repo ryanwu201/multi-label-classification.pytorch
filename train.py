@@ -136,9 +136,10 @@ def main(logger, args):
     os.makedirs(checkpoint, exist_ok=True)
     # log
     logger.setLevel(level=logging.DEBUG)
-    log_file_name = "log.txt"
-    log_file_name = 'inference.txt' if args.inference else log_file_name
-    handler = logging.FileHandler(os.path.join(checkpoint, log_file_name))
+    log_file_name = 'evaluation' if args.evaluate else "train"
+    log_file_name = 'inference' if args.inference else log_file_name
+    os.makedirs(os.path.join(checkpoint, log_file_name))
+    handler = logging.FileHandler(os.path.join(checkpoint, log_file_name, log_file_name + '.log'))
     handler.setLevel(logging.DEBUG)
     formatter = logging.Formatter('[%(asctime)s] %(levelname)s (%(name)s/%(threadName)s) %(message)s')
     handler.setFormatter(formatter)
@@ -206,7 +207,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
                                 world_size=args.world_size, rank=args.rank)
     # Data loading code
     print('==> Preparing dataset')
-    trainset, valset, testset = prepare_dataset(args.dataset, args.pretrain, args.on_linux)
+    trainset, valset, testset, input_size = prepare_dataset(args.dataset, args.pretrain, args.on_linux)
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(trainset)
     else:
@@ -287,7 +288,7 @@ def main_worker(gpu, ngpus_per_node, checkpoint_path, args):
         else:
             model = torch.nn.DataParallel(model).cuda()
     # view the visualization of the model
-    summary(model, input_size=(3, 419, 419))
+    summary(model, input_size=(3, *input_size))
     # define loss function (criterion) and optimizer
     criterion = nn.BCELoss().cuda(args.gpu)
 
@@ -437,9 +438,9 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
                     target = target.cuda(args.gpu, non_blocking=True)
                 # compute output
                 output = model(image)
-                threshold_val = get_optimal_threshold(target.cpu().numpy(), output.cpu().numpy(),
-                                                      num_classes=args.num_classes)
-                threshold.update(np.array(threshold_val))
+                # threshold_val = get_optimal_threshold(target.cpu().numpy(), output.cpu().numpy(),
+                #                                       num_classes=args.num_classes)
+                # threshold.update(np.array(threshold_val))
         for i, (images, target) in enumerate(val_loader):
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
@@ -474,14 +475,6 @@ def validate(val_loader, model, criterion, args, threshold, epoch=None):
 def inference(testset, test_loader_args, model, criterion, args):
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-    from dataset import MultiLabelDataset
-    testset = MultiLabelDataset(
-        label_root_path=False,
-        label_type=testset.label_type,
-        # img_root_path=r'D:\Datasets\new_strawberry\04.05\strawberry_data\1\test_04_06\JPEGImages',
-        # img_root_path=r'D:\Datasets\new_strawberry\04.05\strawberry_data\2\train_04_06\JPEGImages',
-        img_root_path=r'D:\Datasets\new_strawberry\04.05\test\resized\JPEGImages',
-        transform=testset.transform)
     testset.requires_filename = True
     testset.requires_origin = True
     test_loader_args['dataset'] = testset
@@ -498,7 +491,7 @@ def inference(testset, test_loader_args, model, criterion, args):
     lenth = len(test_loader)
     with torch.no_grad():
         end = time.time()
-        for i, (image, filename, origin_image) in enumerate(testset):
+        for i, (image, _, filename, origin_image) in enumerate(testset):
             if args.gpu is not None:
                 image = image.cuda(args.gpu, non_blocking=True)
             # compute output
@@ -523,14 +516,14 @@ def inference(testset, test_loader_args, model, criterion, args):
                 if probability < 0.5: continue
                 heatmap = CAMs[j]
                 label = one_hot_map[class_idx[j]]
-                colors = (255, 0, 0), (0, 165, 255), (0, 0, 255)
+                colors = (255, 0, 0), (0, 165, 255), (0, 0, 255), (255, 0, 0), (0, 165, 255), (0, 0, 255), (
+                    0, 165, 255)
                 bboxes_per_label = get_bbox_from_heatmap(heatmap, 110, label_name=label,
                                                          probability=output.cpu().numpy()[0][class_idx[j]],
                                                          color=colors[class_idx[j]])
                 bboxes.extend(bboxes_per_label)
 
             inference_path = os.path.join(checkpoint, 'inference')
-            os.makedirs(inference_path, exist_ok=True)
             if args.visualize:
                 # save image with bbox per image
                 image_with_bbox_per_image = draw_bbox(origin_image, bboxes)
@@ -546,7 +539,6 @@ def inference(testset, test_loader_args, model, criterion, args):
 def evaluate(testset, test_loader_args, model, criterion, args):
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-
     testset.requires_filename = True
     testset.requires_origin = True
     test_loader_args['dataset'] = testset
@@ -603,7 +595,6 @@ def evaluate(testset, test_loader_args, model, criterion, args):
             width, height = origin_image.shape[1], origin_image.shape[0]
 
             inference_path = os.path.join(checkpoint, 'evaluation')
-            os.makedirs(inference_path, exist_ok=True)
             bboxes = []
             for label, one_hot in one_hot_map.items():
                 if label not in tp:
@@ -643,8 +634,9 @@ def evaluate(testset, test_loader_args, model, criterion, args):
                 result = torch.tensor(origin_image)
                 for j in range(len(class_idx)):
                     heatmap = CAMs[j]
-                    colors = (255, 0, 0), (0, 165, 255), (0, 0, 255)
-                    bboxes_per_label = get_bbox_from_heatmap(heatmap, 110, merge=label == 'leaf', label_name=label,
+                    colors = (255, 0, 0), (0, 165, 255), (0, 0, 255), (255, 0, 0), (0, 165, 255), (0, 0, 255), (
+                        0, 165, 255)
+                    bboxes_per_label = get_bbox_from_heatmap(heatmap, 110, merge=True, label_name=label,
                                                              probability=output.cpu().numpy()[0][class_idx[j]],
                                                              color=colors[class_idx[j]])
                     bboxes.extend(bboxes_per_label)
@@ -684,7 +676,8 @@ def evaluate(testset, test_loader_args, model, criterion, args):
         # result per label
         result_table = PrettyTable()
         result_table.field_names = ["label", "tp", 'tn', 'fp', 'fn', 'accuracy', 'precision', 'recall', 'f2']
-        f2s = dict()
+        f2_table = PrettyTable(['label', 'f2'])
+        f2_sum = 0
         for label, _ in one_hot_map.items():
             acc, p, r, f2__ = metrics.compute_evaluation_metric2(tp[label], tn[label], fn[label], fp[label],
                                                                  {'a', 'p', 'r', 'f2'})
@@ -692,12 +685,11 @@ def evaluate(testset, test_loader_args, model, criterion, args):
                 [label, tp[label].cpu().numpy(), tn[label].cpu().numpy(), fp[label].cpu().numpy(),
                  fn[label].cpu().numpy(), acc.cpu().numpy(), p.cpu().numpy(), r.cpu().numpy(),
                  f2__.cpu().numpy()])
-            f2s[label] = f2__.cpu().numpy()
+            f2_table.add_row([label, f2__.cpu().numpy()])
+            f2_sum += f2__.cpu().numpy()
         print('\n' + str(result_table))
         # result
-        f2_table = PrettyTable(['', 'flower', 'fruit', 'leaf', 'mean'])
-        mean = (f2s['flower'] + f2s['fruit'] + f2s['leaf']) / args.num_classes
-        f2_table.add_row(['f2', f2s['flower'], f2s['fruit'], f2s['leaf'], mean])
+        f2_table.add_row(['mean', f2_sum / args.num_classes])
         print('\n' + str(f2_table))
 
         str_confusion_matrix = show_multi_label_confusion_matrix(confusion_matrix, set_labels)
