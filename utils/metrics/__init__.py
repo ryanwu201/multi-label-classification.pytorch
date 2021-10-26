@@ -158,10 +158,25 @@ def show_multi_label_confusion_matrix(matrix, labels):
 
 def show_confusion_matrix(matrix, labels):
     table = PrettyTable()
-    table.add_column('', [labels[i] for i in range(len(labels))])
+    indexes = []
+
+    # find the indexes of  rows required
     for i in range(len(labels)):
-        label = labels[i]
+        rows, columns = matrix[:, i], matrix[i, :]
+        if any(columns) or any(rows):
+            indexes.append(i)
+            continue
+    # remove the rows useless
+    matrix = np.delete(matrix, [i for i in range(len(labels)) if i not in indexes], 0)
+
+    # add the name of row
+    table_columns = [('', [labels[i] for i in indexes])]
+    # add the values
+    for i in indexes:
         columns = matrix[:, i]
+        table_columns.append((labels[i], columns))
+    # show
+    for label, columns in table_columns:
         table.add_column(label, columns)
     return str(table)
 

@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from itertools import combinations
 
 """
 这里举一个读取pasca voc数据的例子
@@ -163,8 +164,11 @@ class MultiLabelDataset(Dataset):
 
     def get_connect_labels(self):
         if self.labels:
-            return self.labels
-        if self.label_type == 'voc':
+            categories = []
+            for i in range(1, self.num_classes + 1):
+                temp = list(combinations(self.labels, i))
+                categories.extend(['_'.join(labels) for labels in temp])
+        elif self.label_type == 'voc':
             return None
         else:
             categories = ['flower', 'fruit', 'leaf', 'flower_fruit', 'flower_leaf', 'fruit_leaf',
